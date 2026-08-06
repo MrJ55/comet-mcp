@@ -247,12 +247,15 @@ export class CometAI {
           status = 'working';
         } else if (hasStepsCompleted || hasFinishedMarker) {
           status = 'completed';
-        } else if (hasReviewedSources && !hasWorkingText) {
+        } else if (hasAskFollowUp && hasProseContent && !hasActiveStopButton) {
+          // "Ask a follow-up" UI only appears when the answer finished streaming —
+          // must win over hasWorkingText (the answer text itself often contains
+          // words like "Working" / "Analyzing" / "Searching").
+          status = 'completed';
+        } else if (hasReviewedSources && !hasWorkingText && hasAskFollowUp) {
           status = 'completed';
         } else if (hasWorkingText) {
           status = 'working';
-        } else if (hasAskFollowUp && hasProseContent && !hasActiveStopButton) {
-          status = 'completed';
         }
 
         // Extract steps
@@ -285,7 +288,14 @@ export class CometAI {
           }
 
           if (validProseTexts.length > 0) {
-            response = validProseTexts[validProseTexts.length - 1];
+            // Perplexity splits one answer across many [class*="prose"] elements
+            // AND nests them (innerText includes descendants). Joining every
+            // element repeats content; taking only the last truncates to the
+            // tail fragment. Dedupe by containment: keep an element's text only
+            // if it is not fully contained within a longer prose block.
+            const seen = new Set();
+            const unique = validProseTexts.filter(t => seen.has(t) ? false : (seen.add(t), true));
+            response = unique.filter(t => !unique.some(u => u.length > t.length && u.includes(t))).join('\\n\\n');
           }
 
           // Clean up response
@@ -299,20 +309,29 @@ export class CometAI {
           status,
           steps: [...new Set(steps)].slice(-5),
           currentStep: steps.length > 0 ? steps[steps.length - 1] : '',
-          response: response.substring(0, 8000),
+          response: response.substring(0, 30000),
           hasStopButton: hasActiveStopButton
         };
       })()
     `);
 
+    // Harden: the CDP evaluate may return no value (dead tab, extension page,
+    // navigate race, closed browser). Spread defaults so callers never crash
+    // on undefined status/steps/response (e.g. comet_poll's .toUpperCase()).
+    const value = (result?.result?.value ?? {}) as {
+      status?: "idle" | "working" | "completed";
+      steps?: string[];
+      currentStep?: string;
+      response?: string;
+      hasStopButton?: boolean;
+    };
+
     return {
-      ...(result.result.value as {
-        status: "idle" | "working" | "completed";
-        steps: string[];
-        currentStep: string;
-        response: string;
-        hasStopButton: boolean;
-      }),
+      status: value.status ?? "idle",
+      steps: value.steps ?? [],
+      currentStep: value.currentStep ?? "",
+      response: value.response ?? "",
+      hasStopButton: value.hasStopButton ?? false,
       agentBrowsingUrl,
     };
   }
