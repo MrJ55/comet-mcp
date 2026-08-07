@@ -331,11 +331,13 @@ For each provider:
 
 **Re-scoped (both critiques, 2026-08-07):** discovery for all five providers already shipped as a CLI/MCP tool, so P6 shrinks to driver implementation + per-provider typing/markdown quirks + login-expiry simulation. Do NOT re-run the full discovery workflow.
 
+**NEXT IN SEQUENCE (bumped 2026-08-07, ahead of P4/P5):** no P4/P5 dependency gates the drivers — P6 is adapter-layer work (ChatDriver contract), P4/P5 are fabric-layer (relay policy, scheduling); the shared ask machinery (async dispatch c206970, 8s stability window) and all 5 HIGH entries are ready. P6-first also gives P4/P5 real multi-provider test surfaces.
+
 - [x] Repeat discovery, fixture, health, and `PONG` validation for each provider. (all 5 providers live-verified 2026-08-06/07 — ACK/PONG/ALPHA/OK/BRAVO validations, HIGH-confidence entries in `src/providers/entries/*.json`, discovery shipped as CLI + MCP tools, PR #10)
 - [ ] Add provider-specific markdown and typing settings.
-- [ ] Simulate missing hooks and login expiry for each adapter.
-- [ ] Keep provider-specific code minimal; add driver overrides only when configuration cannot express the behavior.
-- [ ] Validate per-provider relay policy before enabling relay.
+- [ ] Simulate missing hooks and login expiry for each adapter. (exercise `login_required`/`degraded`/`blocked` states the entries already model; Grok rate-limit observed live 2026-08-07)
+- [ ] Keep provider-specific code minimal; add driver overrides only when configuration cannot express the behavior. (config-driven = migration-friendly for the typed-adapter core)
+- [ ] Validate per-provider relay policy before enabling relay. — **deferred to after P4** (no relay policy exists until P4; not a gate on the drivers)
 
 **Gate:** all five providers report structured health and degrade independently; a missing selector never becomes a silent empty response. — discovery/verify tooling exists (ADR 0002/0003); structured per-adapter health wiring pending
 
