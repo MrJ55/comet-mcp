@@ -166,6 +166,12 @@ export interface ConversationEvent {
 /**
  * The delivery receipt — the fabric's answer to "what happened to this send?".
  * One receipt per attempt; `unknown` statuses are never auto-resent.
+ *
+ * P1 Half 2 (critique L35/L37): receipts are an APPEND-ONLY stream, not a mutable
+ * record — each attempt gets a fresh receiptId, retries reuse the idempotencyKey
+ * and carry increasing attempt numbers, and extraction evidence (contentHash,
+ * providerMessageId, cursor) rides ON the receipt so reconnect-dedup (P3) and
+ * unknown-delivery reconciliation (P4) have the anchors without a second lookup.
  */
 export interface DeliveryReceipt {
   receiptId: string;
@@ -174,6 +180,12 @@ export interface DeliveryReceipt {
   idempotencyKey: string;
   status: ReceiptStatus;
   recordedAt: string;
+  /** Attempt number (1-based). Retries reuse idempotencyKey, fresh id per attempt. */
+  attempt?: number;
+  /** Extraction evidence (dedup anchors, P1 Half 2 / P3). */
+  contentHash?: string;
+  providerMessageId?: string;
+  cursor?: string;
   /** Optional driver/provider detail (e.g. "blocked: size 12KB > 8KB limit"). */
   details?: string;
 }

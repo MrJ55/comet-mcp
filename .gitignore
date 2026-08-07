@@ -19,3 +19,6 @@ src/providers/entries/.prompt-state.json
 
 # File-backed provider responses (runtime artifacts)
 responses/
+
+# P1 Half 2 conversation event store (runtime artifacts)
+data/

@@ -19,7 +19,7 @@ MCP client -> control plane -> conversation fabric -> provider adapters -> Comet
 | Phase | Deliverable | Completion gate | Status |
 | --- | --- | --- | --- |
 | P0 | Architecture decision record and CDP concurrency spike | Measured safe concurrent-tab ceiling | ✅ DONE (ADR 0001, findings doc, cap=5) |
-| P1 | Conversation fabric and Perplexity contract refactor | Existing behavior preserved; replay-safe deliveries | 🟡 types + Perplexity driver refactor done (ADR 0002/0003, `src/drivers/perplexity.ts`, extraction unit-tested, live smoke passed); event-store runtime (Half 2) pending |
+| P1 | Conversation fabric and Perplexity contract refactor | Existing behavior preserved; replay-safe deliveries | ?? types + Perplexity driver + event-store runtime DONE (ADR 0002, src/drivers/perplexity.ts, src/core/event-store.ts, replay-safety smoke PASSED 2026-08-07); full ten-prompt gate pending |
 | P2 | Grok adapter and discovery pipeline | Ask/poll/stop/health PONG validation passes | ✅ DONE — Perplexity + Grok drivers live-validated (ADR 0004: markdown via turndown, provider dispatcher + `provider_ask/poll/stop` MCP tools, `comet_*` aliases); 28 tests; verified in pi |
 | P3 | Concurrent tab registry and CDP session pool | Perplexity and Grok operate independently | 🟡 audit done; pool+registry+5 tools landed, live gate PASSED (2026-08-07); reconnect-dedup gate blocked on P1 event store |
 | P4 | Approval-required relay with provenance and receipts | Safe relay succeeds or fails explicitly | ⬜ not started |

@@ -159,7 +159,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "provider_ask",
-    description: "Send a prompt to any provider (perplexity, grok, ...) and wait for the complete response. Provider-neutral: dispatches to the registered ChatDriver. Returns text + markdown.",
+    description: "Send a prompt to any provider (perplexity, grok, ...) and wait for the complete response. Provider-neutral: dispatches to the registered ChatDriver. Returns text + markdown. Pass the same idempotencyKey to retry without duplicating the send (P1 Half 2 replay safety).",
     inputSchema: {
       type: "object",
       properties: {
@@ -167,6 +167,7 @@ const TOOLS: Tool[] = [
         prompt: { type: "string", description: "Question or task for the provider" },
         timeout: { type: "number", description: "Max wait time in ms (default: 15000)" },
         tabId: { type: "string", description: "Specific tabId to ask in (optional — defaults to the provider's registered tab)" },
+        idempotencyKey: { type: "string", description: "Replay-safe key: re-sending with the same key returns the prior outcome, never a duplicate send (optional)" },
       },
       required: ["provider", "prompt"],
     },
@@ -285,18 +286,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         prompt = normalizePrompt(prompt);
         // P3: address the session explicitly — reuse the registered tab unless a
         // specific tabId was requested.
+        const idempotencyKey = args?.idempotencyKey ? String(args.idempotencyKey) : undefined;
         const tabId = String(args?.tabId ?? '');
         if (tabId) {
           const session = tabRegistry.get(tabId);
           if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} — use provider_open first` }], isError: true };
-          const outcome = await askAndWaitOn(driver, session, prompt, timeout);
+          const outcome = await askAndWaitOn(driver, session, prompt, timeout, { idempotencyKey });
           if (outcome.completed) {
             return { content: [{ type: "text", text: compactAskResult(provider, outcome) }] };
           }
           return { content: [{ type: "text", text: renderInProgress(outcome) }] };
         }
         const session = await openTab(provider);
-        const outcome = await askAndWaitOn(driver, session, prompt, timeout);
+        const outcome = await askAndWaitOn(driver, session, prompt, timeout, { idempotencyKey });
         if (outcome.completed) {
           return { content: [{ type: "text", text: compactAskResult(provider, outcome) }] };
         }

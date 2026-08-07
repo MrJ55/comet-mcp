@@ -252,7 +252,7 @@ For each provider:
 
 **Outcome:** durable commands and events under existing single-provider behavior.
 
-- [x] Implement `ConversationEnvelope`, event log, delivery receipts, correlation IDs, and idempotency keys. (types: `src/types/conversation.ts`, ADR 0002 — runtime store still to build)
+- [x] Implement `ConversationEnvelope`, event log, delivery receipts, correlation IDs, and idempotency keys. (types: `src/types/conversation.ts`, ADR 0002; runtime: `src/core/event-store.ts` — append-only JSONL + idempotency index + durable cursor checkpoints, P1 Half 2 2026-08-07)
 - [x] Define `ChatDriver`, `ProviderEntry`, `TabSession`, `HealthReport`, and `PollResult`. (types: `src/types/provider.ts`, entries: `src/providers/entries/*.json`, ADR 0002)
 - [x] Refactor Perplexity behavior into the provider contract without changing user-visible behavior. (`src/drivers/perplexity.ts`, extraction in `src/providers/extraction.ts`, server wired via compat layer; P1 gate smoke passed live 2026-08-07)
 - [x] Preserve and test existing extraction fixes: ordering, truncation, whitespace, escaping, and steps parsing. (9 unit tests in `test/unit/extraction.test.ts`, all passing; port is faithful to verified in-page behavior)
@@ -288,7 +288,7 @@ For each provider:
 - [x] Add `provider_open`, `provider_list`, `provider_close`, `provider_health`, and `provider_override`.
 - [x] Persist overrides. (provider_override writes entries via registry writeEntry)
 - [x] Add `lastKnownMessageId`, extraction cursor/version, content hash, and `lastCompletedAt`. (updateSessionAnchors on poll; fields populate)
-- [ ] Implement reconnect logic that does not produce duplicate response events. — **depends on the P1 event-store runtime** (durable extraction cursor; Perplexity critique: reconnect-dedup gate is impossible without it, making the deferred event store a P3 prerequisite, not just P4's).
+- [ ] Implement reconnect logic that does not produce duplicate response events. — **event-store runtime now DONE (`src/core/event-store.ts`, P1 Half 2 2026-08-07): durable cursor checkpoints + `hasResponseHash` substrate exist; the P3 tab-reconnect wiring against them remains**
 
 **Gate:** Perplexity and Grok can be opened, asked, polled, reset, and closed independently; closing or degrading one does not affect the other.
 

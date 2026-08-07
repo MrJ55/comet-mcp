@@ -17,6 +17,13 @@ import { sessionPool } from '../cdp-pool.js';
 import { tabRegistry } from '../tab-registry.js';
 import { perplexityDriver } from './perplexity.js';
 import { grokDriver } from './grok.js';
+import {
+  hasIdempotencyKey, getIdempotencyEvent, recordEnvelopeCreated, recordSendEvent,
+  recordResponseReceived, recordResponseDeduplicated, recordDeliveryReceipt,
+  eventsForCorrelation, nextSequence, _resetForTests as _eventStoreReset,
+} from '../core/event-store.js';
+import { CONSERVATIVE_RELAY_DEFAULTS, DEFAULT_SEND_BUDGET } from '../types/conversation.js';
+import type { ConversationEnvelope } from '../types/conversation.js';
 
 const DRIVERS: Record<string, ChatDriver> = {
   perplexity: perplexityDriver,
@@ -103,6 +110,66 @@ export function updateSessionAnchors(session: TabSession, poll: PollResult): voi
   if (poll.state === 'completed') session.lastCompletedAt = new Date().toISOString();
 }
 
+// ---------------------------------------------------------------------------
+// P1 Half 2 — envelope lifecycle helpers (durable, idempotent sends)
+// ---------------------------------------------------------------------------
+
+/** Build a native-ask envelope (no relay): fresh correlation, idempotent key. */
+export function makeEnvelope(source: ProviderId, idempotencyKey?: string): ConversationEnvelope {
+  const key = idempotencyKey || `ask-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return {
+    idempotencyKey: key,
+    correlationId: `corr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    source,
+    content: '', // filled by the caller before send
+    provenance: {
+      sourceProvider: source,
+      attributedTo: source,
+      safetyClaimed: false,
+    },
+    relay: { ...CONSERVATIVE_RELAY_DEFAULTS },
+    budget: { ...DEFAULT_SEND_BUDGET, wallClockDeadlineMs: Date.now() + 5 * 60 * 1000 },
+    createdAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Replay guard (P1 gate: "recovery/replay creates no duplicate send"). When an
+ * envelope with this idempotencyKey was already recorded, return the PRIOR outcome
+ * (the last response.received for its correlation) instead of sending again.
+ */
+export function replayOutcomeIfRecorded(key: string): AskOutcome | null {
+  const first = getIdempotencyEvent(key);
+  if (!first) return null;
+  const evs = eventsForCorrelation(first.correlationId);
+  const resp = [...evs].reverse().find((e) => e.type === 'response.received' || e.type === 'response.deduplicated');
+  if (resp?.response) {
+    return {
+      completed: true,
+      response: resp.response.poll.response,
+      markdown: null,
+      steps: resp.response.poll.steps,
+      currentStep: '',
+      status: resp.response.poll.state,
+      agentBrowsingUrl: '',
+      timedOut: false,
+      replayed: true,
+    };
+  }
+  const receipt = [...evs].reverse().find((e) => e.type === 'delivery.receipt');
+  return {
+    completed: false,
+    response: '',
+    markdown: null,
+    steps: [],
+    currentStep: '',
+    status: receipt?.receiptStatus ?? 'queued',
+    agentBrowsingUrl: '',
+    timedOut: false,
+    replayed: true,
+  };
+}
+
 /** A normalized ask outcome — the shared response shape for provider_ask/comet_ask. */
 export interface AskOutcome {
   completed: boolean;
@@ -113,6 +180,12 @@ export interface AskOutcome {
   status: string;
   agentBrowsingUrl: string;
   timedOut: boolean;
+  /** P1 Half 2: true when the outcome came from the event store (idempotent replay). */
+  replayed?: boolean;
+  /** P1 Half 2: correlation id of the envelope that produced this outcome. */
+  correlationId?: string;
+  /** P1 Half 2: idempotency key of the envelope. */
+  idempotencyKey?: string;
 }
 
 /** Normalize prompt — convert markdown/bullets to natural text (preserves comet_ask behavior). */
@@ -202,7 +275,7 @@ export function storeResponse(provider: string, text: string, markdown: string |
 }
 
 /** Structured compact result (fits gateway budget). */
-export function structuredCompact(rec: ResponseRecord, preview: string, status: string): string {
+export function structuredCompact(rec: ResponseRecord, preview: string, status: string, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({
     status,
     responseId: rec.id,
@@ -212,13 +285,18 @@ export function structuredCompact(rec: ResponseRecord, preview: string, status: 
     markdownChars: rec.markdownChars,
     contentHash: rec.contentHash,
     expiresAt: rec.expiresAt,
+    ...extra,
   });
 }
 
 /** Persist a completed AskOutcome and return the structured compact tool-result string. */
 export function compactAskResult(provider: string, outcome: AskOutcome): string {
   const { rec } = storeResponse(provider, outcome.response, outcome.markdown ?? null);
-  return structuredCompact(rec, outcome.response, outcome.completed ? 'completed' : outcome.status);
+  const extra: Record<string, unknown> = {};
+  if (outcome.correlationId) extra.correlationId = outcome.correlationId;
+  if (outcome.idempotencyKey) extra.idempotencyKey = outcome.idempotencyKey;
+  if (outcome.replayed) extra.replayed = true;
+  return structuredCompact(rec, outcome.response, outcome.completed ? 'completed' : outcome.status, extra);
 }
 
 /** Chunked retrieval by response ID (Perplexity+Grok critique: ID-based, not path-based). */
@@ -282,8 +360,20 @@ export async function askAndWait(driver: ChatDriver, prompt: string, timeoutMs: 
  * The caller (MCP handler) resolves the tabId; this keeps the session open across
  * ask+poll with no reconnect, and applies per-tab backoff + circuit breaking.
  */
-export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prompt: string, timeoutMs: number): Promise<AskOutcome> {
+export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prompt: string, timeoutMs: number, opts: { idempotencyKey?: string } = {}): Promise<AskOutcome> {
   const targetId = session.targetId;
+
+  // P1 Half 2 — replay guard FIRST: a recorded idempotencyKey means this logical send
+  // already happened; return its prior outcome, never re-send (P1 gate replay-safety).
+  const envelope = makeEnvelope(driver.provider, opts.idempotencyKey);
+  const replayed = opts.idempotencyKey ? replayOutcomeIfRecorded(opts.idempotencyKey) : null;
+  if (replayed) {
+    return { ...replayed, correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey };
+  }
+
+  // durable lifecycle: envelope.created → send.queued
+  recordEnvelopeCreated({ ...envelope, content: prompt });
+  recordSendEvent({ ...envelope, content: prompt }, 'send.queued');
 
   // Snapshot the conversation state BEFORE sending so we can detect the NEW
   // response reliably (a follow-up in an existing thread already has prior text
@@ -293,7 +383,8 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
   const beforeHash = before.contentHash ?? simpleHash(before.response);
   const beforeLen = before.response.length;
 
-  await driver.ask(session, prompt);
+  const askReceipt = await driver.ask(session, prompt);
+  recordSendEvent({ ...envelope, content: prompt }, askReceipt.receipt.status === 'sent' ? 'send.accepted' : 'send.unknown');
 
   const startTime = Date.now();
   const stepsCollected: string[] = [];
@@ -319,6 +410,8 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
         status: 'degraded',
         agentBrowsingUrl: '',
         timedOut: true,
+        correlationId: envelope.correlationId,
+        idempotencyKey: envelope.idempotencyKey,
       };
     }
 
@@ -341,6 +434,8 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
           status: 'degraded',
           agentBrowsingUrl: '',
           timedOut: true,
+          correlationId: envelope.correlationId,
+          idempotencyKey: envelope.idempotencyKey,
         };
       }
       continue; // transient failure — backoff, retry
@@ -360,7 +455,7 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
     // (the "Worked for Xs" marker appears while the list is still appending), so
     // returning on first completed can truncate. Require two identical readings.
     if (last.state === 'completed' && sawNewResponse && hash === prevHash && prevHash !== null) {
-      return {
+      const outcome: AskOutcome = {
         completed: true,
         response: last.response || 'Task completed (no response text extracted)',
         markdown: last.markdown ?? null,
@@ -369,13 +464,42 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
         status: last.state,
         agentBrowsingUrl: last.agentBrowsingUrl,
         timedOut: false,
+        correlationId: envelope.correlationId,
+        idempotencyKey: envelope.idempotencyKey,
       };
+      // durable: response.received (+ cursor checkpoint) → delivery.receipt completed
+      const responseEv = recordResponseReceived(
+        { ...envelope, content: prompt },
+        driver.provider,
+        {
+          messageId: last.messageId,
+          contentHash: hash,
+          cursor: last.cursor ?? hash, // durable extraction cursor (P3 reconnect-dedup)
+          state: last.state,
+          text: outcome.response,
+          steps: stepsCollected,
+        },
+        targetId,
+      );
+      recordDeliveryReceipt({
+        receiptId: `rct-${responseEv.seq}`, // one receipt per attempt, append-only
+        envelopeId: envelope.idempotencyKey,
+        correlationId: envelope.correlationId,
+        idempotencyKey: envelope.idempotencyKey,
+        status: 'completed',
+        recordedAt: new Date().toISOString(),
+        attempt: 1,
+        contentHash: hash,
+        providerMessageId: last.messageId,
+        cursor: last.cursor ?? hash,
+      });
+      return outcome;
     }
     prevHash = hash;
   }
 
   const final = last ?? await driver.poll(session);
-  return {
+  const timedOut: AskOutcome = {
     completed: false,
     response: '',
     markdown: null,
@@ -384,7 +508,20 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
     status: final.state,
     agentBrowsingUrl: final.agentBrowsingUrl,
     timedOut: true,
+    correlationId: envelope.correlationId,
+    idempotencyKey: envelope.idempotencyKey,
   };
+  recordSendEvent({ ...envelope, content: prompt }, 'send.timed_out');
+  recordDeliveryReceipt({
+    receiptId: `rct-${Date.now().toString(36)}`,
+    envelopeId: envelope.idempotencyKey,
+    correlationId: envelope.correlationId,
+    idempotencyKey: envelope.idempotencyKey,
+    status: 'timed_out',
+    recordedAt: new Date().toISOString(),
+    attempt: 1,
+  });
+  return timedOut;
 }
 
 /** Render the "still in progress" view (preserves comet_ask's message shape). */
