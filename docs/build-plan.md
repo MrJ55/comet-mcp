@@ -16,17 +16,30 @@ MCP client -> control plane -> conversation fabric -> provider adapters -> Comet
 
 ## Delivery phases
 
-| Phase | Deliverable | Completion gate |
-| --- | --- | --- |
-| P0 | Architecture decision record and CDP concurrency spike | Measured safe concurrent-tab ceiling |
-| P1 | Conversation fabric and Perplexity contract refactor | Existing behavior preserved; replay-safe deliveries |
-| P2 | Grok adapter and discovery pipeline | Ask/poll/stop/health PONG validation passes |
-| P3 | Concurrent tab registry and CDP session pool | Perplexity and Grok operate independently |
-| P4 | Approval-required relay with provenance and receipts | Safe relay succeeds or fails explicitly |
-| P5 | `wait_any` and bounded scheduler | Plans halt/resume without duplicate sends |
-| P6 | Gemini, ChatGPT, and Claude.ai adapters | Each has structured degradation handling |
-| P7 | Optional fanout, critique, routing, and debate | All features obey budgets and relay policy |
-| P8 | Observability and operational hardening | Drift, failures, and delivery state are diagnosable |
+| Phase | Deliverable | Completion gate | Status |
+| --- | --- | --- | --- |
+| P0 | Architecture decision record and CDP concurrency spike | Measured safe concurrent-tab ceiling | ✅ DONE (ADR 0001, findings doc, cap=5) |
+| P1 | Conversation fabric and Perplexity contract refactor | Existing behavior preserved; replay-safe deliveries | 🟡 types done (ADR 0002, src/types, provider entries); runtime (event store, ChatDriver impl, Perplexity refactor) pending |
+| P2 | Grok adapter and discovery pipeline | Ask/poll/stop/health PONG validation passes | 🟡 discovery DONE for all 5 providers (HIGH confidence entries); adapter impls pending |
+| P3 | Concurrent tab registry and CDP session pool | Perplexity and Grok operate independently | ⬜ not started |
+| P4 | Approval-required relay with provenance and receipts | Safe relay succeeds or fails explicitly | ⬜ not started |
+| P5 | `wait_any` and bounded scheduler | Plans halt/resume without duplicate sends | ⬜ not started |
+| P6 | Gemini, ChatGPT, and Claude.ai adapters | Each has structured degradation handling | 🟡 discovery done; adapter impls pending |
+| P7 | Optional fanout, critique, routing, and debate | All features obey budgets and relay policy | ⬜ not started |
+| P8 | Observability and operational hardening | Drift, failures, and delivery state are diagnosable | 🟡 drift tooling exists (provider_verify/ADRs 0002-0003); hardening pending |
+
+## Discovery is a shipped tool (2026-08-07)
+
+Provider discovery is no longer a test artifact — it ships as part of comet-mcp
+(PR #10, ADR 0002): the engine (`src/core/discovery.ts`), registry
+(`src/core/registry.ts`), CLI (`comet-mcp discover|verify|list`), and MCP tools
+(`provider_discover`, `provider_verify`). Entries are data (`src/providers/entries/*.json`),
+written directly by discovery — DOM-drift repair is `discover → commit new JSON`.
+
+Self-healing provider controls (ADR 0003): confidence-scored selectors (verify is a
+learning loop) + structural fingerprint rebind (re-renders survive without discovery).
+Resolution order: known → fingerprint-rebind → heuristic → discovery escalation.
+
 
 ## Initial source layout
 

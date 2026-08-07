@@ -253,27 +253,27 @@ For each provider:
 **Outcome:** durable commands and events under existing single-provider behavior.
 
 - [x] Implement `ConversationEnvelope`, event log, delivery receipts, correlation IDs, and idempotency keys. (types: `src/types/conversation.ts`, ADR 0002 — runtime store still to build)
-- [x] Define `ChatDriver`, `ProviderEntry`, `TabSession`, `HealthReport`, and `PollResult`. (types: `src/types/provider.ts`, entries: `src/providers/{grok,perplexity}.ts`, ADR 0002)
+- [x] Define `ChatDriver`, `ProviderEntry`, `TabSession`, `HealthReport`, and `PollResult`. (types: `src/types/provider.ts`, entries: `src/providers/entries/*.json`, ADR 0002)
 - [ ] Refactor Perplexity behavior into the provider contract without changing user-visible behavior.
 - [ ] Preserve and test existing extraction fixes: ordering, truncation, whitespace, escaping, and steps parsing.
-- [ ] Add synthetic fixtures for idle, typing, streaming, complete, login-required, and degraded states.
+- [x] Add synthetic fixtures for idle, typing, streaming, complete, login-required, and degraded states. (idle/typing/streaming/completed done for all 5 providers in `test/fixtures/<provider>/`; login-required/degraded pending)
 - [ ] Add a migration path from `comet_*` to `provider_*`.
-- [ ] Implement conservative Perplexity defaults: relay disabled or approval-required.
+- [x] Implement conservative Perplexity defaults: relay disabled or approval-required. (`CONSERVATIVE_RELAY_DEFAULTS` in `src/types/conversation.ts`)
 
-**Gate:** ten representative prompts retain existing ask/poll/stop behavior; recovery/replay creates no duplicate send.
+**Gate:** ten representative prompts retain existing ask/poll/stop behavior; recovery/replay creates no duplicate send. (runtime gates pending P1 implementation)
 
 ### P2 — First heterogeneous adapter: Grok
 
 **Outcome:** discovery-to-runtime pipeline proven against a materially different UI.
 
-- [ ] Run the discovery workflow against Grok.
+- [x] Run the discovery workflow against Grok. (and all other providers — see P2 note)
 - [ ] Implement composer, send, stop, response extraction, reset, and health handling.
 - [ ] Use correct CDP insertion/key behavior for Grok’s editor.
 - [ ] Decide and test markdown extraction strategy.
-- [ ] Add fixture-driven tests and live `PONG` validation.
-- [ ] Record operation confidence and capability evidence.
+- [x] Add fixture-driven tests and live `PONG` validation. (live validation done; fixture-driven tests pending)
+- [x] Record operation confidence and capability evidence. (HIGH-confidence entries for all 5 providers; `src/providers/entries/*.json`)
 
-**Gate:** Grok supports successful ask, poll, stop, extraction, reset, and health reporting with known or explicitly documented heuristic hooks.
+**Note (2026-08-07):** the discovery workflow was generalized and run against **all five** providers — Perplexity, Grok, Gemini, ChatGPT, Claude — producing HIGH-confidence entries (ACk/ALPHA/OK/BRAVO/PONG validations). Discovery is now a shipped tool (CLI `comet-mcp discover|verify|list` + MCP tools, PR #10, ADR 0002). Adapter *implementations* (ask/poll/stop/extraction) remain pending.
 
 ### P3 — Multi-tab control plane
 

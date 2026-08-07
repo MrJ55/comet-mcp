@@ -1,105 +1,113 @@
-# Grok provider discovery — runbook
+# Provider discovery — runbook
 
-- **Date:** 2026-08-06
-- **Status:** Initial discovery complete — HIGH confidence, verified live
-- **Provider entry:** `src/providers/grok.ts`
-- **Fixtures:** `test/fixtures/grok/{idle,typing,streaming,completed}.html`
-- **Raw runs:** `test/integration/out/grok-discovery-*.json`
+- **Updated:** 2026-08-07 (supersedes the Grok-specific runbook; discovery is now a shipped tool)
+- **Status:** All 5 providers discovered live, HIGH confidence (Perplexity, Grok, Gemini, ChatGPT, Claude)
+- **Entries:** `src/providers/entries/*.json` (data, git-committed)
+- **Fixtures:** `test/fixtures/<provider>/{idle,typing,streaming,completed}.html`
+- **Engine:** `src/core/discovery.ts` · **Registry:** `src/core/registry.ts` · **CLI:** `src/cli.ts`
+- **Raw runs:** `test/integration/out/<provider>-discovery-*.json` (gitignored)
 
 ## How discovery works
 
-`test/integration/grok-discover.mjs` is an **offline/on-demand selector miner** — it is
-NOT part of the hot path (per ADR 0001 and the build-plan discovery workflow). It connects
-to the authenticated Comet profile via CDP (port 9222), inventories the grok.com tab,
-then performs **one sanctioned validation submission**:
+Discovery is an **offline/on-demand selector miner, shipped as part of the tool** — it is
+NOT on the hot path (ADR 0001, build plan). The engine connects to the authenticated Comet
+profile via CDP (port 9222), inventories the provider tab, then performs **one sanctioned
+validation submission** with a varied prompt:
 
-1. Connect to the grok.com page target (auto-detected, or pass a target ID).
+1. Connect to the provider page target (auto-detected from the entry's URL pattern).
 2. Inventory idle controls: composer, send button, model picker, new chat, response containers.
    - New chat and model picker are **inspection only** — never activated (preserves session state).
-3. Focus composer, clear residue (Ctrl+A, Delete), type `Say only: PONG`, snapshot typing state.
-4. Scan for the send button (rendered only after text exists), click it (Enter-key fallback).
-5. Observe streaming → completed (stop button **never** appears on the Fast model —
-   the "Working for Xs" indicator is the streaming signal).
-6. Emit `src/providers/grok.ts` data + sanitized DOM fixtures per state.
-7. `--diff` mode compares against the previous run's provider entry (drift detection).
+3. Focus composer, clear residue (Ctrl+A, Delete), type a **rotated validation prompt**
+   (per-provider + per-run rotation — no repeated probe signatures), snapshot typing state.
+4. Scan for the send button (some providers render it only after text exists); click it
+   (Enter-key fallback).
+5. Observe streaming → completed via the provider probe (e.g. Grok's "Working for Xs"
+   indicator — the Fast model **never** renders a stop button).
+6. Emit `src/providers/entries/<provider>.json` + sanitized DOM fixtures per state.
+7. `--diff` mode compares against the previous run's entry (drift detection).
 
-## Usage
+## Usage (CLI — primary on-demand trigger)
 
 ```bash
-# full discovery + PONG validation (auto-finds the grok tab)
-node test/integration/grok-discover.mjs
+# build once (or after source changes)
+npm run build
 
-# diff against previous run
-node test/integration/grok-discover.mjs --diff
+# full discovery + validation (auto-finds the provider tab, one varied prompt)
+comet-mcp discover --provider grok
 
-# target a specific tab
-node test/integration/grok-discover.mjs <targetId-prefix>
+# discover + show selector changes vs the committed entry
+comet-mcp discover --provider grok --diff
+
+# cheap health check — resolves known selectors against the live tab, NO prompt sent
+comet-mcp verify --provider grok
+
+# list all entries + confidence
+comet-mcp list
 ```
 
-Requires: Comet running with `--remote-debugging-port=9222`, logged into grok.com,
-and the grok.com tab open in the Comet profile.
+Requires: Comet running with `--remote-debugging-port=9222`, the provider logged in, and
+the provider tab open in the Comet profile. MCP equivalents: `provider_discover` /
+`provider_verify` tools.
 
-## Verified selectors (2026-08-06, Chrome/150.0.7871.230)
+## Drift workflow (when a provider changes its DOM)
 
-| Control | Selector | Notes |
-|---|---|---|
-| Composer | `[data-testid="chat-input"]` | contenteditable div; focus editable child before `Input.insertText`; alias `[aria-label="Ask Grok anything"]` |
-| Send button | `[data-testid="chat-submit"]` | `aria-label="Submit"`, `type="submit"`; **rendered only after text is typed**; Enter-key fallback verified |
-| Model picker | `#model-select-trigger` | `aria-label="Model select"`, shows current model ("Fast") |
-| New chat | `[aria-label="New chat"]` | icon button |
-| User message | `[data-testid="user-message"]` | |
-| Assistant response | `[data-testid="assistant-message"]` | take the **last** match for the current turn |
-| Streaming | `[data-testid="canvas-working-indicator"]` | body text "Working for Ns" → flips to "Worked for Ns" on completion |
-| Stop button | **NONE** | Fast model never renders one; do not rely on stop-button heuristics |
+```bash
+comet-mcp verify --provider grok        # MISS on a hook → broken
+comet-mcp discover --provider grok --diff   # re-inventory + one varied prompt
+git diff src/providers/entries/grok.json    # review selector changes
+git commit                                   # repaired — no code changes
+```
 
-## State machine (verified live)
+With self-healing controls (ADR 0003): a re-render that preserves structure is absorbed
+by **fingerprint rebind** (no action needed); only a genuine DOM change degrades and
+surfaces the `discover --diff` repair. Verify is a **learning loop**: each successful
+resolve bumps a control's confidence (+0.05), each failure decrements (−0.15);
+confidence < 0.3 evicts the stored selector and flags discovery.
 
-| State | Signal |
-|---|---|
-| idle | no working indicator, composer empty |
-| typing | composer has text, no working indicator |
-| streaming | "Working for Xs" present and/or assistant-message text growing |
-| completed | no working indicator, assistant-message stable for ≥3s |
+## Verified selectors (2026-08-06/07, Chrome/150.0.7871.230)
 
-## What the live run proved
+| Provider | Composer | Send | Response container | Validation |
+|---|---|---|---|---|
+| Perplexity | `#ask-input` | `[aria-label="Submit"]` | `[class*="prose"]` | ACK ✓ |
+| Grok | `[data-testid="chat-input"]` | `[data-testid="chat-submit"]` | `[data-testid="assistant-message"]` | PONG ✓ |
+| Gemini | `[aria-label="Enter a prompt for Gemini"]` | `[aria-label="Send message"]` | `model-response` | ALPHA ✓ |
+| ChatGPT | `[aria-label="Chat with ChatGPT"]` | `#composer-submit-button` | `[data-message-author-role="assistant"]` | OK ✓ |
+| Claude | `[data-testid="chat-input"]` | `[aria-label="Send message"]` | `div.font-claude-response` | BRAVO ✓ |
 
-- **Submission path works:** typed `Say only: PONG` → clicked `chat-submit` → got `PONG`
-  back in ~4-6s (button-click and Enter-key both verified across runs).
-- **Response extraction target:** `[data-testid="assistant-message"]` — the PONG response
-  rendered as a 4-char text node inside it; the markdown body is inside
-  `div.response-content-markdown.markdown.chat-md` within the message.
-- **Conversation container:** Grok renders `#response-<uuid>` divs per turn; the tab URL
-  shifts to `https://grok.com/c/<conversation-id>?rid=<request-id>` during a conversation.
-- **No stop button, ever:** across all runs the strict stop-button probe never matched
-  during generation. The earlier "stop=2" reading was a loose-regex false positive
-  (it matched button *text* like "stop" inside other elements). Streaming state must use
-  the "Working for Xs" indicator.
+Key findings baked into the entries:
 
-## Drift response
+- **Grok**: send button renders only after text is typed; **no stop button ever** on the
+  Fast model — streaming = "Working for Xs" indicator.
+- **Perplexity**: `#ask-input` (the `ask-input-mode-toggle-indicator` testid is a decoy);
+  extraction joins all prose blocks, dedupes by containment, keeps newest (slice).
+- **Claude**: onboarding chats (`?onboarding=1`) are scripted and do not answer arbitrary
+  prompts — discovery needs a normal chat. Response class is `font-claude-response`,
+  not `font-claude-message`.
+- **ChatGPT**: insertText read-back can race React; the send button's presence confirms text.
 
-If health reports (P8) flag missing hooks for Grok:
+## Drift response details
 
-1. Re-run `node test/integration/grok-discover.mjs --diff`.
+If `provider_verify` reports a missing hook:
+
+1. Run `comet-mcp discover --provider X --diff`.
 2. Compare the diff output — changed selectors indicate drift.
-3. Commit the updated provider entry (`src/providers/grok.ts`) + new fixtures.
-4. If the diff shows repeated flapping (e.g. model picker absent), the inventory caps
-   (buttons 60 / responses 30 / composer 20) may need raising — the full button list is
-   kept in `buttonsAll` for control detection, so only the console print is capped.
+3. Commit the updated entry JSON + regenerated fixtures.
+4. If diff shows repeated flapping, the inventory caps may need raising
+   (the full button list is kept in `buttonsAll`; only the console print is capped).
 
 ## Known limitations
 
-- Discovery targets the open conversation in the grok.com tab; it does not open a new
-  chat (new-chat is inspection-only). Repeated discovery runs accumulate `Say only: PONG`
-  messages in the conversation history.
-- Fixtures are sanitized snapshots (scripts/styles/svg stripped) — they capture structure,
-  not live behavior; synthetic DOM tests should combine them with the heuristics above.
-- Streaming fixture requires a generation long enough for the observer to fire
-  ("Working for Xs" + non-empty assistant message) — very short responses may not
-  produce one.
+- Discovery targets the open conversation in the provider tab; it does not open a new
+  chat (new-chat is inspection-only). Repeated discovery runs accumulate validation
+  prompts in the conversation history — prompt rotation keeps signatures varied.
+- Fixtures are sanitized snapshots (scripts/styles/svg stripped) — structure, not live
+  behavior; synthetic tests combine them with the heuristics.
+- The Claude entry requires a normal chat tab (not onboarding).
 
 ## Related
 
 - [Build plan](../build-plan.md)
 - [ADR 0001: Browser-tab transport and relay defaults](../adr/0001-browser-tab-transport-and-relay-defaults.md)
+- [ADR 0002: Conversation fabric type contracts](../adr/0002-conversation-fabric-type-contracts.md)
+- [ADR 0003: Self-healing provider controls](../adr/0003-self-healing-provider-controls.md)
 - [P0 findings: CDP concurrency ceiling](../p0-cdp-concurrency-findings.md)
-- Discovery harness: `test/integration/grok-discover.mjs`
