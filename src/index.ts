@@ -24,7 +24,7 @@ import {
 import { cometClient } from "./cdp-client.js";
 import { tabRegistry } from "./tab-registry.js";
 import { sessionPool } from "./cdp-pool.js";
-import { getDriver, listDrivers, openTab, normalizePrompt, askAndWait, askAndWaitOn, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention, recordPollSuccess } from "./drivers/index.js";
+import { getDriver, listDrivers, openTab, normalizePrompt, askAndWait, askAndWaitOn, dispatchAsk, advanceAsk, isAskPending, lastDispatchedFor, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention, recordPollSuccess } from "./drivers/index.js";
 import { loadEntry, loadAllEntries, writeEntry } from "./core/registry.js";
 import type { ProviderId } from "./types/conversation.js";
 
@@ -314,21 +314,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // specific tabId was requested.
         const idempotencyKey = args?.idempotencyKey ? String(args.idempotencyKey) : undefined;
         const tabId = String(args?.tabId ?? '');
-        if (tabId) {
-          const session = tabRegistry.get(tabId);
-          if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} â€” use provider_open first` }], isError: true };
-          const outcome = await askAndWaitOn(driver, session, prompt, timeout, { idempotencyKey });
-          if (outcome.completed) {
-            return { content: [{ type: "text", text: compactAskResult(provider, outcome) }] };
+        // 2026-08-07: DISPATCH + return immediately (async ask registry). Long asks
+        // used to block the whole RPC window and get abandoned by the pi gateway
+        // (-32001) mid-ask, stranding the prompt in the composer. Now the ask is
+        // dispatched fire-and-forget; the client polls via provider_poll and the
+        // server advances the lifecycle (stability window, dedup, receipt) across
+        // polls, storing the completed response for provider_response.
+        const session = tabId ? (tabRegistry.get(tabId) ?? await openTab(provider)) : await openTab(provider);
+        if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} â€” use provider_open first` }], isError: true };
+        try {
+          const dispatched = await dispatchAsk(driver, session, prompt, { idempotencyKey, timeoutMs: timeout });
+          if (dispatched.replayed) {
+            const { eventsForCorrelation } = await import('./core/event-store.js');
+            const evs = eventsForCorrelation(dispatched.correlationId);
+            const resp = [...evs].reverse().find((e) => e.type === 'response.received');
+            return { content: [{ type: "text", text: JSON.stringify({ status: 'completed', replayed: true, correlationId: dispatched.correlationId, idempotencyKey: dispatched.idempotencyKey, preview: resp?.response?.poll?.response?.slice(0, 200) ?? '' }) }] };
           }
-          return { content: [{ type: "text", text: renderInProgress(outcome) }] };
+          return { content: [{ type: "text", text: JSON.stringify({ status: dispatched.status, correlationId: dispatched.correlationId, idempotencyKey: dispatched.idempotencyKey, hint: 'use provider_poll to advance, provider_response to fetch full content' }) }] };
+        } catch (error) {
+          return { content: [{ type: "text", text: `provider_ask dispatch failed: ${error instanceof Error ? error.message : error}` }], isError: true };
         }
-        const session = await openTab(provider);
-        const outcome = await askAndWaitOn(driver, session, prompt, timeout, { idempotencyKey });
-        if (outcome.completed) {
-          return { content: [{ type: "text", text: compactAskResult(provider, outcome) }] };
-        }
-        return { content: [{ type: "text", text: renderInProgress(outcome) }] };
       }
 
       case "provider_poll": {
@@ -338,6 +343,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const tabId = String(args?.tabId ?? '');
         const session = tabId ? tabRegistry.get(tabId) : await openTab(provider);
         if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} â€” use provider_open first` }], isError: true };
+        // 2026-08-07: if this provider has a dispatched ask pending, advance it
+        // (one poll step; completes when the stability window holds, storing the
+        // response server-side for provider_response).
+        const pendingKey = lastDispatchedFor(provider);
+        if (pendingKey && isAskPending(pendingKey)) {
+          const outcome = await advanceAsk(pendingKey);
+          if (outcome) {
+            if (outcome.completed) {
+              return { content: [{ type: "text", text: compactAskResult(provider, outcome) }] };
+            }
+            return { content: [{ type: "text", text: renderInProgress(outcome) }] };
+          }
+          // transient poll failure — keep pending, report current tab state
+        }
         const poll = await driver.poll(session);
         recordPollSuccess(session.targetId);
         return { content: [{ type: "text", text: renderPoll(poll, provider) }] };
