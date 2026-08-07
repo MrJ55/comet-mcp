@@ -301,7 +301,10 @@ export class CometAI {
           // Clean up response
           if (response) {
             response = response.replace(/View All|Show more|Ask a follow-up|\\d+ sources?/gi, '').trim();
-            response = response.replace(/\\s+/g, ' ').trim();
+            // Collapse only horizontal whitespace; preserve paragraph breaks (the
+            // joined prose blocks must keep their newlines — flattening \\s+ to a
+            // single space would undo the multi-block join).
+            response = response.replace(/[ \\t]+/g, ' ').replace(/\\n{3,}/g, '\\n\\n').trim();
           }
         }
 
@@ -309,7 +312,11 @@ export class CometAI {
           status,
           steps: [...new Set(steps)].slice(-5),
           currentStep: steps.length > 0 ? steps[steps.length - 1] : '',
-          response: response.substring(0, 30000),
+          // Keep the NEWEST content: Perplexity keeps all prior turns in the DOM,
+          // so the joined prose is oldest→newest. Slicing from the start would
+          // return stale earlier turns and can drop the current answer entirely
+          // (Bug #2 regression fixed 2026-08-06: substring(0,N) → slice(-N)).
+          response: response.slice(-30000),
           hasStopButton: hasActiveStopButton
         };
       })()
