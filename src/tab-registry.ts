@@ -103,6 +103,15 @@ export class TabRegistry {
       }
     }
 
+    // Cap guard BEFORE creating a browser tab: a new-tab open creates the tab via
+    // cometClient.newTab() first, so if the pool acquire throws afterward the tab
+    // leaks as an unregistered browser target (found live 2026-08-07: 6th open
+    // left an orphan claude.ai/new tab that closeTab could not close). Check the
+    // cap up front — fail clean, no side effects.
+    if (sessionPool.size >= sessionPool.cap) {
+      throw new TabCapExceededError(sessionPool.cap);
+    }
+
     const target = opts.newTab
       ? await this.openNewProviderTab(provider)
       : (await this.findProviderTab(provider)) ?? (await this.openNewProviderTab(provider));
