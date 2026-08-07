@@ -22,7 +22,7 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { cometClient } from "./cdp-client.js";
-import { legacySendPrompt, legacyGetAgentStatus, legacyStopAgent } from "./drivers/perplexity.js";
+import { getDriver, listDrivers, normalizePrompt, askAndWait, renderPoll, renderInProgress } from "./drivers/index.js";
 
 const TOOLS: Tool[] = [
   {
@@ -96,6 +96,41 @@ const TOOLS: Tool[] = [
       required: ["provider"],
     },
   },
+  {
+    name: "provider_ask",
+    description: "Send a prompt to any provider (perplexity, grok, ...) and wait for the complete response. Provider-neutral: dispatches to the registered ChatDriver. Returns text + markdown.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", description: "Provider name: perplexity, grok" },
+        prompt: { type: "string", description: "Question or task for the provider" },
+        timeout: { type: "number", description: "Max wait time in ms (default: 15000)" },
+      },
+      required: ["provider", "prompt"],
+    },
+  },
+  {
+    name: "provider_poll",
+    description: "Check a provider's current turn status (text + markdown). Provider-neutral dispatch.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", description: "Provider name: perplexity, grok" },
+      },
+      required: ["provider"],
+    },
+  },
+  {
+    name: "provider_stop",
+    description: "Stop the current provider generation if supported (Grok Fast: no-op).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", description: "Provider name: perplexity, grok" },
+      },
+      required: ["provider"],
+    },
+  },
 ];
 
 const server = new Server(
@@ -148,173 +183,74 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "comet_ask": {
         let prompt = args?.prompt as string;
-        const timeout = (args?.timeout as number) || 15000; // Default 15s, use poll for longer tasks
-        const newChat = (args?.newChat as boolean) || false;
-
-        // Validate prompt
+        const timeout = (args?.timeout as number) || 15000;
         if (!prompt || prompt.trim().length === 0) {
           return { content: [{ type: "text", text: "Error: prompt cannot be empty" }] };
         }
-
-        // Normalize prompt - convert markdown/bullets to natural text
-        prompt = prompt
-          .replace(/^[-*•]\s*/gm, '')  // Remove bullet points
-          .replace(/\n+/g, ' ')         // Collapse newlines to spaces
-          .replace(/\s+/g, ' ')         // Collapse multiple spaces
-          .trim();
-
-        // For newChat: full reset (same as comet_connect) to handle post-agentic state
-        if (newChat) {
-          // Clean up extra tabs (fixes CDP state after agentic browsing)
-          const targets = await cometClient.listTargets();
-          const pageTabs = targets.filter(t => t.type === 'page');
-          if (pageTabs.length > 1) {
-            for (let i = 1; i < pageTabs.length; i++) {
-              try { await cometClient.closeTab(pageTabs[i].id); } catch { /* ignore */ }
-            }
-          }
-
-          // Fresh connect to remaining tab
-          const freshTargets = await cometClient.listTargets();
-          const mainTab = freshTargets.find(t => t.type === 'page');
-          if (mainTab) {
-            await cometClient.connect(mainTab.id);
-          }
-
-          // Navigate to Perplexity home
-          await cometClient.navigate("https://www.perplexity.ai/", true);
-          await new Promise(resolve => setTimeout(resolve, 1500));
-        } else {
-          // Not newChat - just ensure we're on Perplexity
-          const tabs = await cometClient.listTabsCategorized();
-          if (tabs.main) {
-            await cometClient.connect(tabs.main.id);
-          }
-
-          const urlResult = await cometClient.evaluate('window.location.href');
-          const currentUrl = urlResult.result.value as string;
-          const isOnPerplexity = currentUrl?.includes('perplexity.ai');
-
-          if (!isOnPerplexity) {
-            await cometClient.navigate("https://www.perplexity.ai/", true);
-            await new Promise(resolve => setTimeout(resolve, 2000));
-          }
+        prompt = normalizePrompt(prompt);
+        // comet_* = Perplexity alias over the generic ask-and-wait (P1 migration path)
+        const outcome = await askAndWait(getDriver('perplexity')!, prompt, timeout);
+        if (outcome.completed) {
+          return { content: [{ type: "text", text: outcome.response + (outcome.markdown ? `\n\n---\n\n${outcome.markdown}` : '') }] };
         }
-
-        // Capture old response state BEFORE sending prompt (for follow-up detection)
-        const oldStateResult = await cometClient.evaluate(`
-          (() => {
-            const proseEls = document.querySelectorAll('[class*="prose"]');
-            const lastProse = proseEls[proseEls.length - 1];
-            return {
-              count: proseEls.length,
-              lastText: lastProse ? lastProse.innerText.substring(0, 100) : ''
-            };
-          })()
-        `);
-        const oldState = oldStateResult.result.value as { count: number; lastText: string };
-
-        // Send the prompt
-        await legacySendPrompt(prompt);
-
-        // Wait for completion
-        const startTime = Date.now();
-        const stepsCollected: string[] = [];
-        let sawNewResponse = false;
-
-        while (Date.now() - startTime < timeout) {
-          await new Promise(resolve => setTimeout(resolve, 2000)); // Poll every 2s
-
-          // Check if we have a NEW response (more prose elements or different text)
-          const currentStateResult = await cometClient.evaluate(`
-            (() => {
-              const proseEls = document.querySelectorAll('[class*="prose"]');
-              const lastProse = proseEls[proseEls.length - 1];
-              return {
-                count: proseEls.length,
-                lastText: lastProse ? lastProse.innerText.substring(0, 100) : ''
-              };
-            })()
-          `);
-          const currentState = currentStateResult.result.value as { count: number; lastText: string };
-
-          // Detect new response
-          if (!sawNewResponse) {
-            if (currentState.count > oldState.count ||
-                (currentState.lastText && currentState.lastText !== oldState.lastText)) {
-              sawNewResponse = true;
-            }
-          }
-
-          const status = await legacyGetAgentStatus();
-
-          // Collect steps
-          for (const step of status.steps) {
-            if (!stepsCollected.includes(step)) {
-              stepsCollected.push(step);
-            }
-          }
-
-          // Task completed - return result directly (but only if we saw a NEW response)
-          if (status.status === 'completed' && sawNewResponse) {
-            return { content: [{ type: "text", text: status.response || 'Task completed (no response text extracted)' }] };
-          }
-        }
-
-        // Still working after initial wait - return "in progress" (non-blocking)
-        const finalStatus = await legacyGetAgentStatus();
-        let inProgressMsg = `Task in progress (${stepsCollected.length} steps so far).\n`;
-        inProgressMsg += `Status: ${finalStatus.status.toUpperCase()}\n`;
-        if (finalStatus.currentStep) {
-          inProgressMsg += `Current: ${finalStatus.currentStep}\n`;
-        }
-        if (finalStatus.agentBrowsingUrl) {
-          inProgressMsg += `Browsing: ${finalStatus.agentBrowsingUrl}\n`;
-        }
-        if (stepsCollected.length > 0) {
-          inProgressMsg += `\nSteps:\n${stepsCollected.map(s => `  • ${s}`).join('\n')}\n`;
-        }
-        inProgressMsg += `\nUse comet_poll to check progress or comet_stop to cancel.`;
-
-        return { content: [{ type: "text", text: inProgressMsg }] };
+        return { content: [{ type: "text", text: renderInProgress(outcome, true) }] };
       }
 
       case "comet_poll": {
-        const status = await legacyGetAgentStatus();
-
-        // If completed, return the response directly (most useful case)
-        if (status.status === 'completed' && status.response) {
-          return { content: [{ type: "text", text: status.response }] };
-        }
-
-        // Still working - return progress info
-        let output = `Status: ${status.status.toUpperCase()}\n`;
-
-        if (status.agentBrowsingUrl) {
-          output += `Browsing: ${status.agentBrowsingUrl}\n`;
-        }
-
-        if (status.currentStep) {
-          output += `Current: ${status.currentStep}\n`;
-        }
-
-        if (status.steps.length > 0) {
-          output += `\nSteps:\n${status.steps.map(s => `  • ${s}`).join('\n')}\n`;
-        }
-
-        if (status.status === 'working') {
-          output += `\n[Use comet_stop to interrupt, or comet_screenshot to see current page]`;
-        }
-
-        return { content: [{ type: "text", text: output }] };
+        const driver = getDriver('perplexity')!;
+        const session = await driver.open();
+        const poll = await driver.poll(session);
+        return { content: [{ type: "text", text: renderPoll(poll) }] };
       }
 
       case "comet_stop": {
-        const stopped = await legacyStopAgent();
+        const driver = getDriver('perplexity')!;
+        const session = await driver.open();
+        const stopped = await driver.stop(session);
         return {
           content: [{
             type: "text",
             text: stopped ? "Agent stopped" : "No active agent to stop",
+          }],
+        };
+      }
+
+      case "provider_ask": {
+        const provider = String(args?.provider ?? '');
+        const driver = getDriver(provider);
+        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        let prompt = args?.prompt as string;
+        const timeout = (args?.timeout as number) || 15000;
+        if (!prompt || prompt.trim().length === 0) {
+          return { content: [{ type: "text", text: "Error: prompt cannot be empty" }], isError: true };
+        }
+        prompt = normalizePrompt(prompt);
+        const outcome = await askAndWait(driver, prompt, timeout);
+        if (outcome.completed) {
+          return { content: [{ type: "text", text: outcome.response + (outcome.markdown ? `\n\n---\n\n${outcome.markdown}` : '') }] };
+        }
+        return { content: [{ type: "text", text: renderInProgress(outcome) }] };
+      }
+
+      case "provider_poll": {
+        const provider = String(args?.provider ?? '');
+        const driver = getDriver(provider);
+        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        const session = await driver.open();
+        const poll = await driver.poll(session);
+        return { content: [{ type: "text", text: renderPoll(poll) }] };
+      }
+
+      case "provider_stop": {
+        const provider = String(args?.provider ?? '');
+        const driver = getDriver(provider);
+        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        const session = await driver.open();
+        const stopped = await driver.stop(session);
+        return {
+          content: [{
+            type: "text",
+            text: stopped ? `${provider} stopped` : `${provider}: no active generation to stop`,
           }],
         };
       }
