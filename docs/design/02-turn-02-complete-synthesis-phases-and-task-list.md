@@ -238,15 +238,15 @@ For each provider:
 
 **Outcome:** approved boundaries and a measured CDP concurrency ceiling.
 
-- [ ] Write an architecture decision record defining browser-tab transport, non-goals, privacy posture, and approval-required relay default.
-- [ ] Run a CDP spike against the actual Comet debug endpoint.
-- [ ] Open 2, then 3, then 5 tabs; maintain one CDP connection per target.
-- [ ] Run concurrent `Runtime.evaluate` and text-input exercises for 60 seconds.
-- [ ] Record latency, errors, disconnects, cross-tab effects, CAPTCHA/anomaly behavior, and the maximum stable tab count.
-- [ ] Publish `docs/p0-cdp-concurrency-findings.md`.
-- [ ] Decide the default concurrent-tab cap from measured evidence.
+- [x] Write an architecture decision record defining browser-tab transport, non-goals, privacy posture, and approval-required relay default. (ADR 0001, accepted 2026-07-28)
+- [x] Run a CDP spike against the actual Comet debug endpoint. (`test/integration/cdp-concurrency-spike.mjs`, live 2026-08-06)
+- [x] Open 2, then 3, then 5 tabs; maintain one CDP connection per target. (incremental 2→3→5, one WS per target)
+- [x] Run concurrent `Runtime.evaluate` and text-input exercises for 60 seconds. (2,239 evaluates + 747 inserts across 3 phases, 0 failures)
+- [x] Record latency, errors, disconnects, cross-tab effects, CAPTCHA/anomaly behavior, and the maximum stable tab count. (0 errors/disconnects/cross-tab; p50 ~2ms; anomalies deferred to opt-in provider testing)
+- [x] Publish `docs/p0-cdp-concurrency-findings.md`. (2026-08-06)
+- [x] Decide the default concurrent-tab cap from measured evidence. (cap = 5, configurable, enforced by P3 tab registry)
 
-**Gate:** five sessions, or the measured lower safe limit, operate without silent loss of control or cross-tab interference.
+**Gate:** five sessions, or the measured lower safe limit, operate without silent loss of control or cross-tab interference. — ✅ PASSED (5 sessions stable, 0 silent loss, 0 cross-tab)
 
 ### P1 — Conversation fabric and Perplexity compatibility
 
@@ -322,13 +322,13 @@ For each provider:
 
 **Outcome:** Gemini, ChatGPT, and Claude.ai join through the same adapter process.
 
-- [ ] Repeat discovery, fixture, health, and `PONG` validation for each provider.
+- [x] Repeat discovery, fixture, health, and `PONG` validation for each provider. (all 5 providers live-verified 2026-08-06/07 — ACK/PONG/ALPHA/OK/BRAVO validations, HIGH-confidence entries in `src/providers/entries/*.json`, discovery shipped as CLI + MCP tools, PR #10)
 - [ ] Add provider-specific markdown and typing settings.
 - [ ] Simulate missing hooks and login expiry for each adapter.
 - [ ] Keep provider-specific code minimal; add driver overrides only when configuration cannot express the behavior.
 - [ ] Validate per-provider relay policy before enabling relay.
 
-**Gate:** all five providers report structured health and degrade independently; a missing selector never becomes a silent empty response.
+**Gate:** all five providers report structured health and degrade independently; a missing selector never becomes a silent empty response. — discovery/verify tooling exists (ADR 0002/0003); structured per-adapter health wiring pending
 
 ### P7 — Optional conversation patterns
 
@@ -349,11 +349,11 @@ For each provider:
 
 - [ ] Append structured health observations to `health-log.jsonl`.
 - [ ] Surface hook failure rate, last degraded time, and last successful verification.
-- [ ] Document selector maintenance, concurrency ceiling, retention, relay exposure, login expiry, UI automation risks, and deprecation timeline.
-- [ ] Add regression fixtures whenever a provider UI changes.
+- [x] Document selector maintenance, concurrency ceiling, retention, relay exposure, login expiry, UI automation risks, and deprecation timeline. (runbook `docs/runbooks/grok-provider-discovery.md` + ADRs 0001-0003 + `docs/p0-cdp-concurrency-findings.md`)
+- [ ] Add regression fixtures whenever a provider UI changes. (fixtures exist per provider in `test/fixtures/`; the regenerate-on-drift workflow is `comet-mcp discover --provider X` — PR #10/ADR 0003)
 - [ ] Establish a release checklist requiring provider health and relay-policy review.
 
-**Gate:** the system can explain why a provider is unavailable, which selector path was used, whether a relay was delivered, and what action is safe next.
+**Gate:** the system can explain why a provider is unavailable, which selector path was used, whether a relay was delivered, and what action is safe next. — partially met: `provider_verify` explains missing hooks + resolution path (ADR 0003); relay-delivery explanation pending P4
 
 ## Test matrix
 
