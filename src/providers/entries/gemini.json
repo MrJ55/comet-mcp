@@ -19,10 +19,10 @@
       ],
       "snippet": " ",
       "confidence": 1,
-      "success_count": 3,
+      "success_count": 4,
       "fail_count": 0,
       "fingerprint": 2949278021,
-      "last_validated": 1786104130
+      "last_validated": 1786121967
     },
     "sendButton": {
       "selector": "[aria-label=\"Send message\"]",
@@ -55,10 +55,10 @@
       "hasIcon": false,
       "disabled": false,
       "confidence": 1,
-      "success_count": 3,
+      "success_count": 4,
       "fail_count": 0,
       "fingerprint": 1862355380,
-      "last_validated": 1786104130
+      "last_validated": 1786121967
     },
     "responseContainer": {
       "selector": "model-response",
@@ -69,10 +69,10 @@
       ],
       "condition": "take the LAST element for the current turn",
       "confidence": 1,
-      "success_count": 3,
+      "success_count": 4,
       "fail_count": 0,
       "fingerprint": 621234207,
-      "last_validated": 1786104130
+      "last_validated": 1786121967
     }
   },
   "responseSelectors": [
