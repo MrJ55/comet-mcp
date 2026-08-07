@@ -15,10 +15,11 @@
         "min-h-[60px]"
       ],
       "snippet": "\n",
-      "confidence": 0.9,
-      "success_count": 0,
+      "confidence": 0.9500000000000001,
+      "success_count": 1,
       "fail_count": 0,
-      "fingerprint": 0
+      "fingerprint": 3028313357,
+      "last_validated": 1786108682
     },
     "sendButton": {
       "selector": "[data-testid=\"chat-submit\"][aria-label=\"Submit\"]",
@@ -50,10 +51,11 @@
       "text": "Fast",
       "hasIcon": true,
       "disabled": false,
-      "confidence": 0.9,
-      "success_count": 0,
+      "confidence": 0.9500000000000001,
+      "success_count": 1,
       "fail_count": 0,
-      "fingerprint": 0
+      "fingerprint": 3501286431,
+      "last_validated": 1786108682
     },
     "newChat": {
       "selector": "[aria-label=\"New chat\"]",
@@ -68,18 +70,20 @@
       "text": "",
       "hasIcon": true,
       "disabled": false,
-      "confidence": 0.9,
-      "success_count": 0,
+      "confidence": 0.9500000000000001,
+      "success_count": 1,
       "fail_count": 0,
-      "fingerprint": 0
+      "fingerprint": 2764096832,
+      "last_validated": 1786108682
     },
     "responseContainer": {
       "selector": "[data-testid=\"assistant-message\"]",
       "condition": "take the LAST element for the current turn",
-      "confidence": 0.9,
-      "success_count": 0,
+      "confidence": 0.9500000000000001,
+      "success_count": 1,
       "fail_count": 0,
-      "fingerprint": 0
+      "fingerprint": 1320723996,
+      "last_validated": 1786108682
     }
   },
   "responseSelectors": [
