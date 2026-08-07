@@ -67,14 +67,24 @@ export class TabRegistry {
     return this.tabs.get(tabId) ?? null;
   }
 
+  /**
+   * Default tab for a provider: prefer the most-recently-completed tab (fix
+   * 2026-08-07 — the old first-tab-wins default made default asks hit a stale tab
+   * and gateway-timeout while a fresher tab would have answered), falling back to
+   * the first non-closed tab.
+   */
   getProviderTab(provider: ProviderId): TabSession | null {
     const ids = this.providerTabs.get(provider);
     if (!ids?.length) return null;
-    for (const id of ids) {
-      const s = this.tabs.get(id);
-      if (s && s.state !== 'closed') return s;
-    }
-    return null;
+    const open = ids.map((id) => this.tabs.get(id)).filter((s): s is TabSession => !!s && s.state !== 'closed');
+    if (open.length === 0) return null;
+    // most recent completed wins; tie-break by newest openedAt
+    return [...open].sort((a, b) => {
+      const aDone = a.lastCompletedAt ?? '';
+      const bDone = b.lastCompletedAt ?? '';
+      if (aDone !== bDone) return aDone < bDone ? 1 : -1;
+      return a.openedAt < b.openedAt ? 1 : -1;
+    })[0];
   }
 
   /** All target ids (pool keys) for a provider. */

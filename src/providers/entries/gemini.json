@@ -19,10 +19,10 @@
       ],
       "snippet": " ",
       "confidence": 1,
-      "success_count": 4,
+      "success_count": 5,
       "fail_count": 0,
       "fingerprint": 2949278021,
-      "last_validated": 1786121967
+      "last_validated": 1786123602
     },
     "sendButton": {
       "selector": "[aria-label=\"Send message\"]",
@@ -55,10 +55,10 @@
       "hasIcon": false,
       "disabled": false,
       "confidence": 1,
-      "success_count": 4,
+      "success_count": 5,
       "fail_count": 0,
       "fingerprint": 1862355380,
-      "last_validated": 1786121967
+      "last_validated": 1786123602
     },
     "responseContainer": {
       "selector": "model-response",
@@ -67,7 +67,8 @@
         "rich-text",
         "user-query"
       ],
-      "condition": "take the LAST element for the current turn",
+      "conditional": true,
+      "condition": "take the LAST element for the current turn — response container exists only after a first response",
       "confidence": 1,
       "success_count": 4,
       "fail_count": 0,
