@@ -37,6 +37,8 @@ export interface PollResult {
   currentStep: string;
   /** Extracted answer text (normalized). */
   response: string;
+  /** P2: Markdown rendering of the response (from innerHTML via turndown). Optional — null when not available. */
+  markdown?: string | null;
   /**
    * Verified discovery finding (2026-08-06): Grok Fast model never renders a stop
    * button. Perplexity: true while working. Drivers report truthfully; the fabric must

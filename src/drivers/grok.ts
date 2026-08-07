@@ -26,6 +26,7 @@ import type { DeliveryReceipt } from '../types/conversation.js';
 import { loadEntry, resolveWithConfidence, recordSuccess, recordFailure, writeEntry } from '../core/registry.js';
 import { resolveWithRebind } from '../core/fingerprint.js';
 import { extractGrokResponse, determineGrokStatus } from '../providers/extraction.js';
+import { htmlToMarkdown } from '../providers/markdown.js';
 
 const entry = () => loadEntry('grok');
 
@@ -92,7 +93,9 @@ const POLL_SCRIPT = `(() => {
   const body = document.body.innerText;
   const msgs = [...document.querySelectorAll('[data-testid="assistant-message"]')];
   const texts = msgs.map(el => (el.innerText || '').trim()).filter(t => t.length > 0);
-  return { bodyText: body, assistantMessages: texts };
+  // P2 markdown: last assistant-message's innerHTML for conversion (timing line stripped in markdown.ts)
+  const htmls = msgs.map(el => el.innerHTML);
+  return { bodyText: body, assistantMessages: texts, assistantHtmls: htmls };
 })()`;
 
 export class GrokDriver implements ChatDriver {
@@ -179,18 +182,24 @@ export class GrokDriver implements ChatDriver {
     const value = (raw?.result?.value ?? {}) as {
       bodyText?: string;
       assistantMessages?: string[];
+      assistantHtmls?: string[];
     };
     const bodyText = value.bodyText ?? '';
     const messages = value.assistantMessages ?? [];
 
     const state = determineGrokStatus({ bodyText, lastMessageLen: messages[messages.length - 1]?.length ?? 0 });
     const extraction = state === 'completed' ? extractGrokResponse(messages) : null;
+    // P2 markdown: convert the LAST assistant-message's innerHTML when completed
+    const markdown = state === 'completed' && (value.assistantHtmls?.length ?? 0) > 0
+      ? htmlToMarkdown('grok', value.assistantHtmls![value.assistantHtmls!.length - 1])
+      : null;
 
     return {
       state: state as ProviderState,
       steps: [],
       currentStep: '',
       response: extraction?.response ?? '',
+      markdown,
       // Verified finding: Grok Fast model NEVER renders a stop button.
       hasStopButton: false,
       agentBrowsingUrl: '',

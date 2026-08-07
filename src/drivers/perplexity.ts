@@ -23,6 +23,7 @@ import { resolveWithRebind } from '../core/fingerprint.js';
 import {
   extractResponse, extractSteps, determineStatus, filterProseTexts,
 } from '../providers/extraction.js';
+import { htmlToMarkdown } from '../providers/markdown.js';
 
 /** Composer selectors used by the old CometAI, kept as the heuristic fallback chain. */
 const COMPOSER_FALLBACKS = [
@@ -118,13 +119,16 @@ const POLL_SCRIPT = `(() => {
   // collect RAW prose texts (filtering happens Node-side)
   const mainContent = document.querySelector('main') || document.body;
   const proseTexts = [];
+  const proseHtmls = [];
   for (const el of mainContent.querySelectorAll('[class*="prose"]')) {
     if (el.closest('nav, aside, header, footer, form')) continue;
     const t = el.innerText.trim();
     if (t.length > 0) proseTexts.push(t);
+    // P2 markdown: capture the LAST prose element's innerHTML for conversion
+    proseHtmls.push(el.innerHTML);
   }
 
-  return { hasActiveStopButton, hasLoadingSpinner, bodyText: body, proseTexts };
+  return { hasActiveStopButton, hasLoadingSpinner, bodyText: body, proseTexts, proseHtmls };
 })()`;
 
 export class PerplexityDriver implements ChatDriver {
@@ -261,6 +265,7 @@ export class PerplexityDriver implements ChatDriver {
       hasLoadingSpinner?: boolean;
       bodyText?: string;
       proseTexts?: string[];
+      proseHtmls?: string[];
     };
 
     const bodyText = value.bodyText ?? '';
@@ -271,12 +276,17 @@ export class PerplexityDriver implements ChatDriver {
     });
     const { steps, currentStep } = extractSteps(bodyText);
     const extraction = status === 'completed' ? extractResponse(value.proseTexts ?? []) : null;
+    // P2 markdown: convert the LAST prose container's innerHTML when completed
+    const markdown = status === 'completed' && (value.proseHtmls?.length ?? 0) > 0
+      ? htmlToMarkdown('perplexity', value.proseHtmls![value.proseHtmls!.length - 1])
+      : null;
 
     return {
       state: status as ProviderState,
       steps,
       currentStep,
       response: extraction?.response ?? '',
+      markdown,
       hasStopButton: value.hasActiveStopButton === true,
       agentBrowsingUrl,
       contentHash: extraction ? simpleHash(extraction.response) : undefined,
