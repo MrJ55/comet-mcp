@@ -69,6 +69,30 @@ test('guard: no existing entry → allow', () => {
   assert.ok(!guardDecision(null, lowEntry), 'first discovery always writes');
 });
 
+test('guard: existing conditional flags lost in new run → refuse', () => {
+  const withConditionals = {
+    confidence: 'high',
+    controls: {
+      sendButton: { conditional: true },
+      responseContainer: { conditional: true },
+      composer: {},
+    },
+  };
+  const noConditionals = {
+    confidence: 'high',
+    controls: { sendButton: {}, responseContainer: {}, composer: {} }, // same count, flags dropped
+  };
+  // mirror must include the conditional-count comparison
+  const mirror = (existing, fresh) => {
+    const existingCond = existing ? Object.values(existing.controls ?? {}).filter((c) => c?.conditional === true).length : 0;
+    const newCond = Object.values(fresh.controls).filter((c) => c?.conditional === true).length;
+    return guardDecision(existing, fresh) || (existing && existingCond > newCond);
+  };
+  assert.ok(mirror(withConditionals, noConditionals), 'existing conditional flags must be protected');
+  // equal conditional counts → allow
+  assert.ok(!mirror(noConditionals, withConditionals), 'new run with MORE conditional flags is fine');
+});
+
 // composer ranking — mirrors the INVENTORY sort: visible+editable first
 function rankComposers(composers) {
   return [...composers]

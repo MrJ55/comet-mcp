@@ -2,36 +2,30 @@
   "provider": "claude",
   "url": "https://claude.ai/",
   "version": "Chrome/150.0.7871.230",
-  "discoveredAt": "2026-08-07T09:19:38.169Z",
-  "method": "live-CDP-inventory + PONG validation",
+  "discoveredAt": "2026-08-07T19:24:47.847Z",
+  "method": "live-CDP-inventory + READY validation",
   "confidence": "high",
   "controls": {
     "composer": {
       "selector": "[data-testid=\"chat-input\"]",
+      "confidence": 0.9500000000000001,
+      "success_count": 1,
+      "fail_count": 0,
       "tag": "div",
       "testid": "chat-input",
       "aria": "Write your prompt to Claude",
       "role": "textbox",
       "classes": [
         "tiptap",
-        "ProseMirror"
+        "ProseMirror",
+        "ProseMirror-focused"
       ],
-      "snippet": " ",
-      "confidence": 0.7000000000000001,
-      "success_count": 2,
-      "fail_count": 2,
-      "fingerprint": 1327876510,
-      "last_validated": 1786123602
+      "snippet": "\n",
+      "fingerprint": 3338592320,
+      "last_validated": 1786130712
     },
     "sendButton": {
-      "selector": "#_r_eq_[aria-label=\"Send message\"]",
-      "sel": "#_r_eq_[aria-label=\"Send message\"]",
-      "aria": "Send message",
-      "testid": "",
-      "text": "",
-      "type": "button",
-      "hasIcon": false,
-      "disabled": false,
+      "selector": "[aria-label=\"Send message\"]",
       "confidence": 0.9,
       "success_count": 0,
       "fail_count": 0,
@@ -41,8 +35,11 @@
     },
     "modelPicker": {
       "selector": "[data-testid=\"model-selector-dropdown\"]",
+      "confidence": 0.9500000000000001,
+      "success_count": 1,
+      "fail_count": 0,
       "tag": "button",
-      "id": "base-ui-_r_cp_",
+      "id": "base-ui-_r_6o_",
       "testid": "model-selector-dropdown",
       "aria": "Model: Haiku 4.5",
       "classes": [
@@ -54,23 +51,19 @@
       "text": "Haiku 4.5 ",
       "hasIcon": false,
       "disabled": false,
-      "confidence": 0.29999999999999993,
-      "success_count": 0,
-      "fail_count": 4,
-      "fingerprint": 118280991,
-      "last_validated": 1786123602
+      "fingerprint": 592845485,
+      "last_validated": 1786130712
     },
     "responseContainer": {
       "selector": "div.font-claude-response",
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
       "aliases": [
         "[class*=\"font-claude-response\"]"
       ],
       "conditional": true,
-      "condition": "rendered only after the first response — empty-state idle absence is not drift",
-      "confidence": 0.9,
-      "success_count": 0,
-      "fail_count": 0,
-      "fingerprint": 0
+      "condition": "rendered only after the first response — empty-state idle absence is not drift"
     }
   },
   "responseSelectors": [
