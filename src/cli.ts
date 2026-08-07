@@ -60,10 +60,12 @@ export async function runCli(argv: string[]): Promise<number> {
         console.log(`no ${provider} tab found — open the provider tab in Comet first`);
         return 1;
       }
-      console.log(`${provider} verify:`);
+      console.log(`${provider} verify (no prompt sent):`);
       for (const c of result.checks) {
-        console.log(`  [${c.ok ? 'OK' : 'MISS'}] ${c.name}: ${c.selector}${c.conditional ? ' (conditional)' : ''}`);
+        const conf = c.confidence !== undefined ? ` conf=${c.confidence.toFixed(2)}` : '';
+        console.log(`  [${c.ok ? 'OK' : 'MISS'}] ${c.name}: ${c.selector}${c.conditional ? ' (conditional)' : ''}${conf}`);
       }
+      if (result.rebound?.length) console.log(`  ↺ rebind: ${result.rebound.join(', ')} (re-render survived)`);
       console.log(result.healthy ? 'HEALTHY' : 'UNHEALTHY — re-run: comet-mcp discover --provider ' + provider + ' --diff');
       return result.healthy ? 0 : 1;
     }

@@ -15,7 +15,11 @@
       "classes": [
         "wcDTda_fallbackTextarea"
       ],
-      "snippet": ""
+      "snippet": "",
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
+      "fingerprint": 0
     },
     "sendButton": {
       "selector": "#composer-submit-button[data-testid=\"send-button\"][aria-label=\"Send prompt\"]",
@@ -25,7 +29,13 @@
       "text": "",
       "type": "",
       "hasIcon": true,
-      "disabled": false
+      "disabled": false,
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
+      "fingerprint": 0,
+      "conditional": true,
+      "condition": "rendered only after composer has text"
     },
     "modelPicker": {
       "selector": "#radix-_R_4abnelpakqac9l35_",
@@ -41,14 +51,22 @@
       ],
       "text": "ChatGPT",
       "hasIcon": true,
-      "disabled": false
+      "disabled": false,
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
+      "fingerprint": 0
     },
     "responseContainer": {
       "selector": "[data-message-author-role=\"assistant\"]",
       "aliases": [
         "[data-testid=\"conversation-turn\"]"
       ],
-      "condition": "take the LAST element for the current turn"
+      "condition": "take the LAST element for the current turn",
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
+      "fingerprint": 0
     }
   },
   "responseSelectors": [

@@ -18,7 +18,8 @@
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { ENTRIES_DIR, writeEntry, validateEntry, packageRoot } from './registry.js';
+import { ENTRIES_DIR, writeEntry, validateEntry, packageRoot, recordSuccess, recordFailure, confidenceStart } from './registry.js';
+import { resolveWithRebind, fingerprintOf } from './fingerprint.js';
 import type { ProviderEntry, ProviderState } from '../types/provider.js';
 import type { ProviderId } from '../types/conversation.js';
 
@@ -513,13 +514,15 @@ export async function runDiscovery(
     : (state === 'completed') ? 'medium' : 'low';
 
   const controls: any = {};
-  if (composer) controls.composer = { selector: composerSel, ...composer };
-  if (sendSel) controls.sendButton = { selector: sendSel };
-  if (modelPicker) controls.modelPicker = { selector: bestSelector(modelPicker), ...modelPicker };
-  if (newChat) controls.newChat = { selector: bestSelector(newChat), ...newChat };
+  const seedConf = confidenceStart(confidence);
+  if (composer) controls.composer = { selector: composerSel, confidence: seedConf, success_count: 0, fail_count: 0, ...composer };
+  if (sendSel) controls.sendButton = { selector: sendSel, confidence: seedConf, success_count: 0, fail_count: 0 };
+  if (modelPicker) controls.modelPicker = { selector: bestSelector(modelPicker), confidence: seedConf, success_count: 0, fail_count: 0, ...modelPicker };
+  if (newChat) controls.newChat = { selector: bestSelector(newChat), confidence: seedConf, success_count: 0, fail_count: 0, ...newChat };
   if (cfg.responseSelectors.length) {
     controls.responseContainer = {
       selector: cfg.responseSelectors[0],
+      confidence: seedConf, success_count: 0, fail_count: 0,
       ...(cfg.responseSelectors.length > 1 ? { aliases: cfg.responseSelectors.slice(1) } : {}),
       condition: 'take the LAST element for the current turn',
     };
@@ -570,34 +573,82 @@ export async function runDiscovery(
 export interface VerifyResult {
   provider: ProviderId;
   tabFound: boolean;
-  checks: { name: string; selector: string; conditional: boolean; ok: boolean }[];
+  checks: { name: string; selector: string; conditional: boolean; ok: boolean; confidence: number; skipped?: boolean }[];
   healthy: boolean;
+  /** ADR 0003: control names rebound via structural fingerprint (re-render survived). */
+  rebound: string[];
 }
 
+/**
+ * Cheap health check: resolve the entry's known selectors against the live tab.
+ * Sends NO prompt. ADR 0003: this is a LEARNING loop — each control's confidence
+ * is updated (success +0.05, failure −0.15, learn-only-from-success) and persisted.
+ */
 export async function verifyProvider(provider: ProviderId): Promise<VerifyResult> {
   const cfg = PROVIDERS[provider];
   if (!cfg) throw new Error(`unknown provider: ${provider}`);
   const entry = loadEntryFile(provider);
   const list = await fetch(`http://${HOST}:${PORT}/json/list`).then(r => r.json());
   const target = list.find((t: any) => t.type === 'page' && cfg.urlPattern.test(t.url));
-  if (!target) return { provider, tabFound: false, checks: [], healthy: false };
+  if (!target) return { provider, tabFound: false, checks: [], healthy: false, rebound: [] };
 
   const s = new CDPSession(target.webSocketDebuggerUrl);
   await s.open();
   await s.send('Runtime.enable');
   const checks: VerifyResult['checks'] = [];
+  const rebound: string[] = [];
   if (entry) {
     for (const [name, control] of Object.entries(entry.controls) as [string, any][]) {
       if (!control?.selector) continue;
-      const ok = await s.evaluate(`document.querySelector(${JSON.stringify(control.selector)}) !== null`)
-        .then(v => v === true).catch(() => false);
-      checks.push({ name, selector: control.selector, conditional: control.conditional === true, ok });
+      const conditional = control.conditional === true;
+      // Conditional controls (e.g. send buttons rendered only after typing) are
+      // legitimately absent at idle. Do NOT punish their confidence for idle absence
+      // — a send button that can't be verified without typing is not a drift signal.
+      // Mark skipped, no confidence change, not a health failure. Their precondition
+      // (e.g. "composer has text") is exercised by provider_discover instead.
+      if (conditional) {
+        checks.push({
+          name, selector: control.selector, conditional: true, ok: true, skipped: true,
+          confidence: control.confidence ?? confidenceStart(entry.confidence ?? 'medium'),
+        });
+        continue;
+      }
+      // ADR 0003: resolve with fingerprint rebind — try the known selector, and on a
+      // miss attempt a structural-fingerprint match (re-render immunity) before
+      // recording a plain failure. Only a genuine DOM change (no fp match) degrades.
+      const resolved = await resolveWithRebind(
+        (expr) => s.evaluate(expr).then(v => v).catch(() => null),
+        control.selector,
+        control.fingerprint,
+      );
+      const ok = resolved !== null;
+      const effectiveSelector = resolved?.selector ?? control.selector;
+      // seed missing confidence from the ENTRY's grade (not a hardcoded fallback)
+      const confidence = control.confidence ?? confidenceStart(entry.confidence ?? 'medium');
+      if (ok) {
+        const updated = recordSuccess(control);
+        // capture the structural fingerprint for next-time rebind
+        if (!updated.fingerprint || resolved?.rebound) {
+          updated.fingerprint = await s.evaluate(fingerprintOf(effectiveSelector)).then(v => (typeof v === 'number' ? v : 0)).catch(() => 0);
+        }
+        if (resolved?.rebound) updated.last_sig = effectiveSelector;
+        (entry.controls as Record<string, any>)[name] = updated;
+        if (resolved?.rebound) rebound.push(name);
+        checks.push({ name, selector: effectiveSelector, conditional: false, ok, confidence: updated.confidence ?? confidence });
+      } else {
+        const { control: updated, evicted } = recordFailure(control);
+        (entry.controls as Record<string, any>)[name] = updated;
+        checks.push({ name, selector: control.selector, conditional: false, ok, confidence: updated.confidence ?? confidence });
+        if (evicted) checks.push({ name: name + ' (evicted)', selector: '', conditional: false, ok: false, confidence: updated.confidence ?? 0 });
+      }
     }
+    // persist the updated entry once (read-modify-write via registry)
+    writeEntry(entry);
   }
   s.close();
   const unconditional = checks.filter(c => !c.conditional);
   const healthy = unconditional.length > 0 && unconditional.every(c => c.ok);
-  return { provider, tabFound: true, checks, healthy };
+  return { provider, tabFound: true, checks, healthy, rebound };
 }
 
 function loadEntryFile(provider: ProviderId): ProviderEntry | null {

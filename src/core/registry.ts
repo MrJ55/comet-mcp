@@ -131,6 +131,96 @@ export function resolveControl(entry: ProviderEntry, name: ProviderControlName):
   return control?.selector ?? null;
 }
 
+// ---------- ADR 0003: confidence-scored controls ----------
+// Learn-only-from-success, asymmetric scoring (success +0.05, failure −0.15),
+// evict below 0.3, trust threshold 0.7 (above = hot-path direct resolve).
+// Mirrors Bladebro's KnowledgeBase (src/knowledge.rs).
+
+export const CONFIDENCE_TRUST = 0.7;
+export const CONFIDENCE_EVICT = 0.3;
+export const CONFIDENCE_SUCCESS_INCREMENT = 0.05;
+export const CONFIDENCE_FAIL_DECREMENT = 0.15;
+
+/** Map a discovery confidence grade to a numeric start. */
+export function confidenceStart(grade: 'high' | 'medium' | 'low'): number {
+  return grade === 'high' ? 0.9 : grade === 'medium' ? 0.6 : 0.3;
+}
+
+/** True when the control's selector is trusted enough for hot-path direct resolve. */
+export function isTrusted(control: ProviderControl | undefined): boolean {
+  return !!control && (control.confidence ?? confidenceStart('medium')) >= CONFIDENCE_TRUST;
+}
+
+/**
+ * Record a successful resolve: bump confidence, counters, last_validated.
+ * Learn only from success — a miss never learns a new selector.
+ * Returns a NEW control (immutable update).
+ */
+export function recordSuccess(control: ProviderControl): ProviderControl {
+  const c = control.confidence ?? confidenceStart('medium');
+  return {
+    ...control,
+    confidence: Math.min(1, c + CONFIDENCE_SUCCESS_INCREMENT),
+    success_count: (control.success_count ?? 0) + 1,
+    last_validated: Math.floor(Date.now() / 1000),
+  };
+}
+
+/**
+ * Record a failed resolve: decrement confidence (asymmetric — costs 3x a success).
+ * Returns { control, evicted } — evicted=true when confidence dropped below EVICT.
+ */
+export function recordFailure(control: ProviderControl): { control: ProviderControl; evicted: boolean } {
+  const c = control.confidence ?? confidenceStart('medium');
+  const next = Math.max(0, c - CONFIDENCE_FAIL_DECREMENT);
+  return {
+    control: {
+      ...control,
+      confidence: next,
+      fail_count: (control.fail_count ?? 0) + 1,
+      last_validated: Math.floor(Date.now() / 1000),
+    },
+    evicted: next < CONFIDENCE_EVICT,
+  };
+}
+
+/**
+ * Resolve a control with confidence awareness (ADR 0003).
+ * - trusted (≥0.7): return the stored selector unconditionally (hot path).
+ * - untrusted: return the stored selector (caller will fall back to heuristics on miss).
+ * - evicted (<0.3): return null — caller must use heuristics and flag discovery.
+ * Returns { selector, trusted }.
+ */
+export function resolveWithConfidence(
+  entry: ProviderEntry,
+  name: ProviderControlName,
+): { selector: string | null; trusted: boolean; control: ProviderControl | undefined } {
+  const control = entry.controls[name];
+  if (!control?.selector) return { selector: null, trusted: false, control };
+  const c = control.confidence ?? confidenceStart('medium');
+  if (c < CONFIDENCE_EVICT) return { selector: null, trusted: false, control };
+  return { selector: control.selector, trusted: c >= CONFIDENCE_TRUST, control };
+}
+
+/**
+ * Persist a control's updated confidence back into the entry file (read-modify-write
+ * with a timestamp guard against concurrent writers). Returns the updated entry, or
+ * null if the file vanished between load and write.
+ */
+export function persistControlUpdate(
+  provider: ProviderId,
+  name: ProviderControlName,
+  updater: (control: ProviderControl) => ProviderControl,
+): ProviderEntry | null {
+  const entry = loadEntry(provider);
+  if (!entry) return null;
+  const control = entry.controls[name];
+  if (!control) return null;
+  entry.controls[name] = updater(control);
+  writeEntry(entry);
+  return entry;
+}
+
 /** All selectors an entry carries, for health/verify checks. */
 export function allControlSelectors(entry: ProviderEntry): { name: ProviderControlName; selector: string; conditional: boolean }[] {
   const out: { name: ProviderControlName; selector: string; conditional: boolean }[] = [];

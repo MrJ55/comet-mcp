@@ -16,7 +16,11 @@
         "tiptap",
         "ProseMirror"
       ],
-      "snippet": " "
+      "snippet": " ",
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
+      "fingerprint": 0
     },
     "sendButton": {
       "selector": "#_r_eq_[aria-label=\"Send message\"]",
@@ -26,7 +30,13 @@
       "text": "",
       "type": "button",
       "hasIcon": false,
-      "disabled": false
+      "disabled": false,
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
+      "fingerprint": 0,
+      "conditional": true,
+      "condition": "rendered only after composer has text"
     },
     "modelPicker": {
       "selector": "#base-ui-_r_cp_",
@@ -42,14 +52,22 @@
       ],
       "text": "Haiku 4.5 ",
       "hasIcon": false,
-      "disabled": false
+      "disabled": false,
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
+      "fingerprint": 0
     },
     "responseContainer": {
       "selector": "div.font-claude-response",
       "aliases": [
         "[class*=\"font-claude-response\"]"
       ],
-      "condition": "take the LAST element for the current turn"
+      "condition": "take the LAST element for the current turn",
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
+      "fingerprint": 0
     }
   },
   "responseSelectors": [

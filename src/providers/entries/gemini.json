@@ -17,7 +17,12 @@
         "textarea",
         "new-input-ui"
       ],
-      "snippet": " "
+      "snippet": " ",
+      "confidence": 1,
+      "success_count": 3,
+      "fail_count": 0,
+      "fingerprint": 2949278021,
+      "last_validated": 1786104130
     },
     "sendButton": {
       "selector": "[aria-label=\"Send message\"]",
@@ -27,7 +32,14 @@
       "text": "",
       "type": "",
       "hasIcon": false,
-      "disabled": false
+      "disabled": false,
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
+      "fingerprint": 0,
+      "last_validated": 1786104082,
+      "conditional": true,
+      "condition": "rendered only after composer has text"
     },
     "modelPicker": {
       "selector": "[aria-label=\"Gemini Apps Activity\"]",
@@ -41,7 +53,12 @@
       ],
       "text": "",
       "hasIcon": false,
-      "disabled": false
+      "disabled": false,
+      "confidence": 1,
+      "success_count": 3,
+      "fail_count": 0,
+      "fingerprint": 1862355380,
+      "last_validated": 1786104130
     },
     "responseContainer": {
       "selector": "model-response",
@@ -50,7 +67,12 @@
         "rich-text",
         "user-query"
       ],
-      "condition": "take the LAST element for the current turn"
+      "condition": "take the LAST element for the current turn",
+      "confidence": 1,
+      "success_count": 3,
+      "fail_count": 0,
+      "fingerprint": 621234207,
+      "last_validated": 1786104130
     }
   },
   "responseSelectors": [

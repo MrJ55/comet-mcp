@@ -93,6 +93,11 @@ export interface HealthReport {
  * A CSS selector that resolves a control, with aliases and render preconditions.
  * Produced by live discovery (src/core/discovery.ts); consumed by drivers via
  * src/core/registry.ts (known selector → heuristic → persisted override).
+ *
+ * Runtime feedback fields (ADR 0003): confidence is learned by provider_verify —
+ * success +0.05, failure −0.15 (asymmetric), learn only from success, evict < 0.3.
+ * High confidence (≥ 0.7) controls resolve directly on the hot path; low ones fall
+ * back to heuristics and flag discovery.
  */
 export interface ProviderControl {
   selector: string;
@@ -100,6 +105,18 @@ export interface ProviderControl {
   /** True when the control only exists after a precondition (e.g. text typed). */
   conditional?: boolean;
   condition?: string;
+  /** ADR 0003: runtime confidence (0..1). Starts at discovery-time value. */
+  confidence?: number;
+  /** ADR 0003: successful resolves (each bumps confidence +0.05). */
+  success_count?: number;
+  /** ADR 0003: failed resolves (each decrements confidence −0.15). */
+  fail_count?: number;
+  /** ADR 0003: epoch seconds of last successful validation. */
+  last_validated?: number;
+  /** ADR 0003: structural fingerprint (FNV-1a of ancestor chain+tag+children+attrs). 0 = unknown. */
+  fingerprint?: number;
+  /** ADR 0003: signature string (role|name|ordinal) last successfully resolved. */
+  last_sig?: string;
 }
 
 /** Control names a provider entry can carry (provider-specific subsets). */
