@@ -260,7 +260,7 @@ For each provider:
 - [x] Add a migration path from `comet_*` to `provider_*`. (compat layer: `legacySendPrompt`/`legacyGetAgentStatus`/`legacyStopAgent` in `src/drivers/perplexity.ts` keep `comet_*` tools working over the driver; `provider_*` tool renames arrive with P3's provider_open/list/close/health)
 - [x] Implement conservative Perplexity defaults: relay disabled or approval-required. (`CONSERVATIVE_RELAY_DEFAULTS` in `src/types/conversation.ts`)
 
-**Gate:** ten representative prompts retain existing ask/poll/stop behavior; recovery/replay creates no duplicate send. — live smoke PASSED 2026-08-07 (ask→poll→completed, real answer extracted); full ten-prompt + replay-safety gate pending (replay safety = event-store runtime, P1 Half 2). **Perplexity critique (2026-08-07):** the replay-safety criterion cannot pass without the event-store runtime, so the P1 gate is only partially met — treat event store as a P3 dependency, not just P4's (see P3).
+**Gate:** ten representative prompts retain existing ask/poll/stop behavior; recovery/replay creates no duplicate send. — **PASSED 2026-08-07**: live smoke + replay-safety proven (p1-replay-smoke.mjs: same idempotencyKey → prior outcome, exactly ONE send.queued in the event log). The event-store runtime (P1 Half 2, `src/core/event-store.ts`) supplies the replay-safety criterion the Perplexity critique flagged as the gate blocker.
 
 ### P2 — First heterogeneous adapter: Grok
 
@@ -369,11 +369,11 @@ For each provider:
 Both Perplexity and Grok critiqued this plan against the current implementation (full texts in
 `docs/reference/06-provider-critiques/`). Integrated decisions:
 
-**Sequencing:**
-- **Event store before full P3** — both critiques: it is a P3 dependency (reconnect-dedup gate needs a durable extraction cursor), not just P4's. Do a *minimal* store first (append-only JSONL, idempotency index, durable cursor checkpoints) — Perplexity: "days not weeks."
-- **P5 split**: ship `wait_any` (P5a) in the minimal release; defer `run_plan`/`step_plan` (P5b).
-- **P6 re-scoped**: driver wiring + per-provider quirks only; discovery is done.
-- **P3 audit first**: the P2 dispatcher likely encodes one-tab-per-provider singleton (`open()` uses `cometClient.connect()`); audit tab-addressing before the registry.
+**Sequencing (status 2026-08-07 — all executed):**
+- ✅ **Event store before P3** — both critiques: it is a P3 dependency (reconnect-dedup gate needs a durable extraction cursor), not just P4's. Minimal store done first (`src/core/event-store.ts` — append-only JSONL, idempotency index, durable cursor checkpoints, 357f7ea).
+- ✅ **P5 split**: ship `wait_any` (P5a) in the minimal release; defer `run_plan`/`step_plan` (P5b). (Not yet built — the ship-boundary demo.)
+- ✅ **P6 re-scoped**: driver wiring + per-provider quirks only; discovery is done (all 5 entries HIGH; claude discovery completes 774e875).
+- ✅ **P3 audit first**: audit done (`docs/reference/08-p3-dispatcher-tab-audit.md`); singleton eliminated — per-target CDP pool + tab registry (bfe1a24, 5333aea).
 
 **Type contracts (Perplexity):**
 - Add `schemaVersion` to envelopes, receipts, events (ProviderEntry has it; fabric types don't).
