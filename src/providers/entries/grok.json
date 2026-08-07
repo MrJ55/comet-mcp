@@ -78,7 +78,8 @@
     },
     "responseContainer": {
       "selector": "[data-testid=\"assistant-message\"]",
-      "condition": "take the LAST element for the current turn",
+      "conditional": true,
+      "condition": "take the LAST element for the current turn — response container exists only after a first response",
       "confidence": 0.9500000000000001,
       "success_count": 1,
       "fail_count": 0,

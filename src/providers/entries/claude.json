@@ -17,11 +17,11 @@
         "ProseMirror"
       ],
       "snippet": " ",
-      "confidence": 0.65,
-      "success_count": 1,
+      "confidence": 0.7000000000000001,
+      "success_count": 2,
       "fail_count": 2,
       "fingerprint": 1327876510,
-      "last_validated": 1786122012
+      "last_validated": 1786123602
     },
     "sendButton": {
       "selector": "#_r_eq_[aria-label=\"Send message\"]",
@@ -54,23 +54,23 @@
       "text": "Haiku 4.5 ",
       "hasIcon": false,
       "disabled": false,
-      "confidence": 0.44999999999999996,
+      "confidence": 0.29999999999999993,
       "success_count": 0,
-      "fail_count": 3,
+      "fail_count": 4,
       "fingerprint": 0,
-      "last_validated": 1786122012
+      "last_validated": 1786123602
     },
     "responseContainer": {
       "selector": "div.font-claude-response",
       "aliases": [
         "[class*=\"font-claude-response\"]"
       ],
-      "condition": "take the LAST element for the current turn",
-      "confidence": 0.44999999999999996,
+      "conditional": true,
+      "condition": "rendered only after the first response — empty-state idle absence is not drift",
+      "confidence": 0.9,
       "success_count": 0,
-      "fail_count": 3,
-      "fingerprint": 0,
-      "last_validated": 1786122012
+      "fail_count": 0,
+      "fingerprint": 0
     }
   },
   "responseSelectors": [

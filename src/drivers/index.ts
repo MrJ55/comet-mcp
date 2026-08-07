@@ -59,6 +59,15 @@ const POLL_MAX_MS = 15000;
 const CIRCUIT_TRIP_THRESHOLD = 5;   // consecutive poll failures before the breaker opens
 const CIRCUIT_COOLDOWN_MS = 30000;  // half-open retry after cooldown
 
+/**
+ * Completion stability window (found live 2026-08-07): Grok pauses between phases
+ * ("Worked for Xs" appears while the research trail is done but the ANSWER is still
+ * streaming). Two identical 2s-apart polls can catch such a pause and latch a
+ * truncated answer (observed: latched 1592 chars of a 10205-char answer). Completion
+ * now requires the response hash to be unchanged for at least this wall-clock window.
+ */
+export const MIN_COMPLETION_STABILITY_MS = 8000;
+
 interface TabCircuit {
   failures: number;
   openUntil: number; // epoch ms; 0 = closed
@@ -101,6 +110,33 @@ export function recordPollFailure(targetId: string): number {
 export function isCircuitOpen(targetId: string): boolean {
   const c = circuits.get(targetId);
   return !!c && c.openUntil > Date.now();
+}
+
+/**
+ * Pure completion-stability decision (fix 2026-08-07). The OLD check returned
+ * completed after TWO identical readings — but Grok pauses mid-stream for 2-4s
+ * between phases, so two 2s-apart polls can both catch the same truncated snapshot
+ * (observed: latched 1592 chars of a 10205-char answer). Completion now requires
+ * the hash to be unchanged for MIN_COMPLETION_STABILITY_MS of wall-clock time.
+ *
+ * @param stableSince epoch ms when the current hash first became stable (null = none)
+ * @param now epoch ms
+ * @returns complete=true only when stability held the window; stableSince is the
+ *   value to carry into the next poll (null when the hash changed/restarted).
+ */
+export function completionStability(
+  hash: string | null,
+  prevHash: string | null,
+  stableSince: number | null,
+  now: number,
+): { complete: boolean; stableSince: number | null } {
+  const sameAsPrev = hash !== null && prevHash !== null && hash === prevHash;
+  if (!sameAsPrev) {
+    return { complete: false, stableSince: null };
+  }
+  const since = stableSince ?? now;
+  const held = now - since >= MIN_COMPLETION_STABILITY_MS;
+  return { complete: held, stableSince: since };
 }
 
 /**
@@ -403,7 +439,8 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
   const stepsCollected: string[] = [];
   let sawNewResponse = false;
   let last: PollResult | null = null;
-  let prevHash: string | null = null; // for stability check: two identical readings = done
+  let prevHash: string | null = null; // for the stability window (fix 2026-08-07)
+  let stableSince: number | null = null; // wall-clock start of the current stable hash
   let delay = POLL_BASE_MS;
 
   while (Date.now() - startTime < timeoutMs) {
@@ -463,12 +500,16 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
     if (last.response.length > 0 && (hash !== beforeHash || last.response.length > beforeLen)) {
       sawNewResponse = true;
     }
-    // COMPLETED requires stability: the response hash must be unchanged from the
-    // PREVIOUS poll. A single 'completed' reading can catch the DOM mid-render
-    // (the "Worked for Xs" marker appears while the list is still appending), so
-    // returning on first completed can truncate. Require two identical readings.
-    if (last.state === 'completed' && sawNewResponse && hash === prevHash && prevHash !== null) {
-      const outcome: AskOutcome = {
+    // COMPLETED requires stability: the response hash must be unchanged for
+    // MIN_COMPLETION_STABILITY_MS of wall-clock time. A single 'completed' reading
+    // can catch the DOM mid-render (the "Worked for Xs" marker appears while the
+    // answer is still appending — observed live: latched 1592 chars of a 10205-char
+    // Grok answer after two identical 2s-apart readings caught a mid-stream pause).
+    if (last.state === 'completed' && sawNewResponse) {
+      const { complete, stableSince: nextSince } = completionStability(hash, prevHash, stableSince, Date.now());
+      stableSince = nextSince;
+      if (complete) {
+        const outcome: AskOutcome = {
         completed: true,
         response: last.response || 'Task completed (no response text extracted)',
         markdown: last.markdown ?? null,
@@ -526,6 +567,7 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
         details: alreadyRecorded ? 'reconnect-dedup: content already recorded for this correlation' : undefined,
       });
       return alreadyRecorded ? { ...outcome, deduped: true } : outcome;
+      }
     }
     prevHash = hash;
   }

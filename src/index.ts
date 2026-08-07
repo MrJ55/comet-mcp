@@ -563,10 +563,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "provider_health": {
         const provider = String(args?.provider ?? '');
         const driver = getDriver(provider);
-        if (!driver) return { content: [{ type: "text", text: `No ChatDriver for ${provider} yet (P6) â€” use provider_verify for entry-level health (all 5 entries exist)` }], isError: true };
+        if (!driver) {
+          // pre-driver provider (P6): delegate to the entry-level verify (no prompt)
+          const { verifyProvider, listProviders } = await import("./core/discovery.js");
+          if (!listProviders().includes(provider as any)) {
+            return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${knownProviders().join(', ')})` }], isError: true };
+          }
+          try {
+            const result = await verifyProvider(provider as any);
+            if (!result.tabFound) {
+              return { content: [{ type: "text", text: `no ${provider} tab found — open the provider tab in Comet first` }], isError: true };
+            }
+            let text = `${provider} health (entry-level verify, no prompt): ${result.healthy ? 'HEALTHY' : 'DEGRADED'}\n`;
+            for (const c of result.checks) text += `  [${c.ok ? 'OK' : 'MISS'}${c.conditional ? ' (conditional)' : ''}] ${c.name}\n`;
+            if (result.rebound?.length) text += `  ↺ rebind: ${result.rebound.join(', ')}\n`;
+            return { content: [{ type: "text", text }] };
+          } catch (error) {
+            return { content: [{ type: "text", text: `provider_health failed: ${error instanceof Error ? error.message : error}` }], isError: true };
+          }
+        }
         const tabId = String(args?.tabId ?? '');
         const session = tabId ? tabRegistry.get(tabId) : tabRegistry.getProviderTab(driver.provider);
-        if (!session) return { content: [{ type: "text", text: `no registered tab for ${provider} â€” use provider_open first` }], isError: true };
+        if (!session) return { content: [{ type: "text", text: `no registered tab for ${provider} — use provider_open first` }], isError: true };
         const health = await driver.health(session);
         let text = `${provider} health (tabId=${session.targetId}): ${health.healthy ? 'HEALTHY' : 'DEGRADED'}${health.loginRequired ? ' LOGIN_REQUIRED' : ''}\n`;
         for (const c of health.hookResolution) text += `  [${c.source}] ${c.control}\n`;

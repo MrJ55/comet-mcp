@@ -6,6 +6,7 @@ import assert from 'node:assert';
 import { test } from 'node:test';
 import {
   pollDelayFor, recordPollSuccess, recordPollFailure, isCircuitOpen,
+  completionStability, MIN_COMPLETION_STABILITY_MS,
 } from '../../dist/drivers/index.js';
 import { TabCapExceededError, DEFAULT_TAB_CAP, sessionPool } from '../../dist/cdp-pool.js';
 import { tabRegistry } from '../../dist/tab-registry.js';
@@ -44,6 +45,28 @@ test('P3 cap: TabCapExceededError carries the cap and a clear code', () => {
 
 test('P3 cap default is 5 (P0 measured safe limit)', () => {
   assert.equal(DEFAULT_TAB_CAP, 5);
+});
+
+test('fix 2026-08-07: completion requires stability window, not two readings (Grok early-latch)', () => {
+  const t0 = 1_000_000;
+  // two identical readings 2s apart must NOT complete (the old bug: latched 1592
+  // chars of a 10205-char Grok answer on a mid-stream pause)
+  const r1 = completionStability('hashA', 'hashA', null, t0);
+  assert.equal(r1.complete, false, 'first stable reading: not complete');
+  const r2 = completionStability('hashA', 'hashA', r1.stableSince, t0 + 2000);
+  assert.equal(r2.complete, false, 'two readings 2s apart: NOT complete (old code returned here)');
+  // hash changed mid-window → clock restarts
+  const r3 = completionStability('hashB', 'hashA', r2.stableSince, t0 + 4000);
+  assert.equal(r3.complete, false);
+  assert.equal(r3.stableSince, null, 'hash change restarts the stability clock');
+  // stability held the full window → complete
+  const r4 = completionStability('hashB', 'hashB', null, t0 + 6000);
+  const r5 = completionStability('hashB', 'hashB', r4.stableSince, t0 + 6000 + MIN_COMPLETION_STABILITY_MS + 1);
+  assert.equal(r5.complete, true, 'stable for the full window → complete');
+});
+
+test('fix 2026-08-07: stability window constant is 8s (covers Grok mid-stream pauses)', () => {
+  assert.equal(MIN_COMPLETION_STABILITY_MS, 8000);
 });
 
 test('P3 cap guard: open() at cap throws BEFORE creating a browser tab (no orphan leak)', async () => {
