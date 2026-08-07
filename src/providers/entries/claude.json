@@ -8,8 +8,8 @@
   "controls": {
     "composer": {
       "selector": "[data-testid=\"chat-input\"]",
-      "confidence": 0.9500000000000001,
-      "success_count": 1,
+      "confidence": 1,
+      "success_count": 2,
       "fail_count": 0,
       "tag": "div",
       "testid": "chat-input",
@@ -22,7 +22,7 @@
       ],
       "snippet": "\n",
       "fingerprint": 3338592320,
-      "last_validated": 1786130712
+      "last_validated": 1786132285
     },
     "sendButton": {
       "selector": "[aria-label=\"Send message\"]",
@@ -35,8 +35,8 @@
     },
     "modelPicker": {
       "selector": "[data-testid=\"model-selector-dropdown\"]",
-      "confidence": 0.9500000000000001,
-      "success_count": 1,
+      "confidence": 1,
+      "success_count": 2,
       "fail_count": 0,
       "tag": "button",
       "id": "base-ui-_r_6o_",
@@ -52,7 +52,7 @@
       "hasIcon": false,
       "disabled": false,
       "fingerprint": 592845485,
-      "last_validated": 1786130712
+      "last_validated": 1786132285
     },
     "responseContainer": {
       "selector": "div.font-claude-response",

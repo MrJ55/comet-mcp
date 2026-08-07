@@ -610,3 +610,191 @@ export function renderInProgress(outcome: AskOutcome, useCometNames = false): st
   msg += `\nUse ${poll} to check progress or ${stop} to cancel.`;
   return msg;
 }
+
+// ---------------------------------------------------------------------------
+// Async ask registry (2026-08-07) — gateway-timeout survival
+// ---------------------------------------------------------------------------
+// The pi MCP gateway caps the RPC round-trip (~150s); a long provider ask that
+// blocks inside askAndWaitOn can be abandoned by the gateway (-32001) mid-ask,
+// stranding the prompt in the composer (observed live: review prompt typed but
+// never submitted, tab left dirty). The file-backed response store only helps
+// AFTER completion — it never solved the RPC-window problem.
+//
+// Fix: split ask into dispatch (fire-and-forget, returns immediately) + advance
+// (one poll step, driven by provider_poll). The ask lifecycle (envelope, 8s
+// stability window, dedup, receipt) runs server-side across polls; the client
+// never holds the RPC open. provider_poll advances the registered ask and, on
+// completion, stores the response (fetched via provider_response).
+
+interface PendingAsk {
+  driver: ChatDriver;
+  session: TabSession;
+  prompt: string;
+  envelope: ConversationEnvelope;
+  beforeHash: string;
+  beforeLen: number;
+  startTime: number;
+  timeoutMs: number;
+  stepsCollected: string[];
+  sawNewResponse: boolean;
+  last: PollResult | null;
+  prevHash: string | null;
+  stableSince: number | null;
+}
+
+const pendingAsks = new Map<string, PendingAsk>();
+
+/** Key a pending ask by idempotencyKey (replay-safe) or correlationId. */
+function askKey(envelope: ConversationEnvelope): string {
+  return envelope.idempotencyKey;
+}
+
+/** Last dispatched ask key per provider (for provider_poll to advance). */
+const lastDispatched = new Map<string, string>();
+
+/** The most recent dispatched-ask key for a provider ('' when none). */
+export function lastDispatchedFor(provider: string): string {
+  return lastDispatched.get(provider) ?? '';
+}
+
+/**
+ * Dispatch an ask and return immediately. Records the durable lifecycle up to
+ * send.accepted; the client polls via provider_poll to advance/completing.
+ * Returns { correlationId, idempotencyKey, status }.
+ */
+export async function dispatchAsk(
+  driver: ChatDriver,
+  session: TabSession,
+  prompt: string,
+  opts: { idempotencyKey?: string; timeoutMs?: number } = {},
+): Promise<{ correlationId: string; idempotencyKey: string; status: string; replayed?: boolean }> {
+  const envelope = makeEnvelope(driver.provider, opts.idempotencyKey);
+  const replayed = opts.idempotencyKey ? replayOutcomeIfRecorded(opts.idempotencyKey) : null;
+  if (replayed) {
+    return { correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey, status: 'completed', replayed: true };
+  }
+
+  // durable lifecycle: envelope.created → send.queued → snapshot → ask → accepted
+  recordEnvelopeCreated({ ...envelope, content: prompt });
+  recordSendEvent({ ...envelope, content: prompt }, 'send.queued');
+  const before = await driver.poll(session);
+  updateSessionAnchors(session, before);
+  const beforeHash = before.contentHash ?? simpleHash(before.response);
+  const beforeLen = before.response.length;
+  const askReceipt = await driver.ask(session, prompt);
+  recordSendEvent({ ...envelope, content: prompt }, askReceipt.receipt.status === 'sent' ? 'send.accepted' : 'send.unknown');
+
+  pendingAsks.set(askKey(envelope), {
+    driver, session, prompt, envelope,
+    beforeHash, beforeLen,
+    startTime: Date.now(),
+    timeoutMs: opts.timeoutMs ?? 15000,
+    stepsCollected: [], sawNewResponse: false,
+    last: null, prevHash: null, stableSince: null,
+  });
+  lastDispatched.set(driver.provider, askKey(envelope));
+  return { correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey, status: 'in_progress' };
+}
+
+/**
+ * Advance a dispatched ask by ONE poll step (called from provider_poll).
+ * Returns the AskOutcome: completed (response stored + receipt recorded) when the
+ * stability window holds; timedOut when the ask budget expires; otherwise the
+ * in-progress view. The pending entry is removed on completion/timeout.
+ */
+export async function advanceAsk(key: string): Promise<AskOutcome | null> {
+  const p = pendingAsks.get(key);
+  if (!p) return null;
+  const { driver, session, envelope } = p;
+  const targetId = session.targetId;
+
+  if (Date.now() - p.startTime >= p.timeoutMs) {
+    pendingAsks.delete(key);
+    recordSendEvent({ ...envelope, content: p.prompt }, 'send.timed_out');
+    recordDeliveryReceipt({
+      receiptId: `rct-${Date.now().toString(36)}`,
+      envelopeId: envelope.idempotencyKey,
+      correlationId: envelope.correlationId,
+      idempotencyKey: envelope.idempotencyKey,
+      status: 'timed_out', recordedAt: new Date().toISOString(), attempt: 1,
+    });
+    return {
+      completed: false, response: '', markdown: null, steps: p.stepsCollected,
+      currentStep: p.last?.currentStep ?? '', status: p.last?.state ?? 'timed_out',
+      agentBrowsingUrl: '', timedOut: true,
+      correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
+    };
+  }
+
+  let poll: PollResult;
+  try {
+    poll = await driver.poll(session);
+    recordPollSuccess(targetId);
+    updateSessionAnchors(session, poll);
+  } catch {
+    recordPollFailure(targetId);
+    return null; // transient — keep pending, client retries poll
+  }
+  p.last = poll;
+  for (const step of poll.steps) if (!p.stepsCollected.includes(step)) p.stepsCollected.push(step);
+  const hash = poll.contentHash ?? simpleHash(poll.response);
+  if (poll.response.length > 0 && (hash !== p.beforeHash || poll.response.length > p.beforeLen)) {
+    p.sawNewResponse = true;
+  }
+
+  if (poll.state === 'completed' && p.sawNewResponse) {
+    const { complete, stableSince } = completionStability(hash, p.prevHash, p.stableSince, Date.now());
+    p.stableSince = stableSince;
+    if (complete) {
+      pendingAsks.delete(key);
+      const outcome: AskOutcome = {
+        completed: true,
+        response: poll.response || 'Task completed (no response text extracted)',
+        markdown: poll.markdown ?? null,
+        steps: p.stepsCollected,
+        currentStep: poll.currentStep,
+        status: poll.state,
+        agentBrowsingUrl: poll.agentBrowsingUrl,
+        timedOut: false,
+        correlationId: envelope.correlationId,
+        idempotencyKey: envelope.idempotencyKey,
+      };
+      // durable: response.received (+ cursor checkpoint) → delivery.receipt completed
+      const alreadyRecorded = hasResponseHash(envelope.correlationId, hash);
+      const responseEv = alreadyRecorded
+        ? recordResponseDeduplicated({ ...envelope, content: p.prompt }, driver.provider, {
+            messageId: poll.messageId, contentHash: hash, cursor: poll.cursor ?? hash,
+            state: poll.state, text: outcome.response, steps: p.stepsCollected,
+          })
+        : recordResponseReceived({ ...envelope, content: p.prompt }, driver.provider, {
+            messageId: poll.messageId, contentHash: hash, cursor: poll.cursor ?? hash,
+            state: poll.state, text: outcome.response, steps: p.stepsCollected,
+          }, targetId);
+      recordDeliveryReceipt({
+        receiptId: `rct-${responseEv.seq}`, envelopeId: envelope.idempotencyKey,
+        correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
+        status: 'completed', recordedAt: new Date().toISOString(), attempt: 1,
+        contentHash: hash, providerMessageId: poll.messageId, cursor: poll.cursor ?? hash,
+        details: alreadyRecorded ? 'reconnect-dedup: content already recorded for this correlation' : undefined,
+      });
+      return alreadyRecorded ? { ...outcome, deduped: true } : outcome;
+    }
+  }
+  p.prevHash = hash;
+  return {
+    completed: false, response: '', markdown: null, steps: p.stepsCollected,
+    currentStep: poll.currentStep, status: poll.state,
+    agentBrowsingUrl: poll.agentBrowsingUrl, timedOut: false,
+    correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
+  };
+}
+
+/** True when a dispatched ask is still pending for this key. */
+export function isAskPending(key: string): boolean {
+  return pendingAsks.has(key);
+}
+
+/** List pending ask keys (diagnostics). */
+export function listPendingAsks(): string[] {
+  return [...pendingAsks.keys()];
+}
