@@ -16,10 +16,11 @@
         "wcDTda_fallbackTextarea"
       ],
       "snippet": "",
-      "confidence": 0.9,
-      "success_count": 0,
+      "confidence": 0.9500000000000001,
+      "success_count": 1,
       "fail_count": 0,
-      "fingerprint": 0
+      "fingerprint": 3817820722,
+      "last_validated": 1786121967
     },
     "sendButton": {
       "selector": "#composer-submit-button[data-testid=\"send-button\"][aria-label=\"Send prompt\"]",
@@ -52,10 +53,11 @@
       "text": "ChatGPT",
       "hasIcon": true,
       "disabled": false,
-      "confidence": 0.9,
-      "success_count": 0,
+      "confidence": 0.9500000000000001,
+      "success_count": 1,
       "fail_count": 0,
-      "fingerprint": 0
+      "fingerprint": 2408220404,
+      "last_validated": 1786121967
     },
     "responseContainer": {
       "selector": "[data-message-author-role=\"assistant\"]",
@@ -63,10 +65,11 @@
         "[data-testid=\"conversation-turn\"]"
       ],
       "condition": "take the LAST element for the current turn",
-      "confidence": 0.9,
-      "success_count": 0,
+      "confidence": 0.9500000000000001,
+      "success_count": 1,
       "fail_count": 0,
-      "fingerprint": 0
+      "fingerprint": 2632415425,
+      "last_validated": 1786121967
     }
   },
   "responseSelectors": [

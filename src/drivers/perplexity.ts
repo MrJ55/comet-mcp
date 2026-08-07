@@ -254,12 +254,19 @@ export class PerplexityDriver implements ChatDriver {
   async poll(session: TabSession): Promise<PollResult> {
     const handle = handleFor(session);
 
-    // agent browsing URL (unchanged from CometAI.getAgentStatus) — browser-level list, stateless
+    // agent browsing URL — P3 fix: with multiple provider tabs open, the legacy
+    // listTabsCategorized classification ("any non-Perplexity page = agent browsing")
+    // mislabels SIBLING provider tabs (grok.com, claude.ai, ...) as the agent's
+    // browsing target. Exclude tabs registered in the tab registry (they are
+    // provider tabs, not the agent browsing).
     let agentBrowsingUrl = '';
     try {
       const { cometClient } = await import('../cdp-client.js');
       const tabs = await cometClient.listTabsCategorized();
-      if (tabs.agentBrowsing) agentBrowsingUrl = tabs.agentBrowsing.url;
+      const registeredTabIds = tabRegistry.list().map((s) => s.targetId);
+      if (tabs.agentBrowsing && !registeredTabIds.includes(tabs.agentBrowsing.id)) {
+        agentBrowsingUrl = tabs.agentBrowsing.url;
+      }
     } catch { /* continue without URL */ }
 
     const raw = await handle.safeEvaluate(POLL_SCRIPT);

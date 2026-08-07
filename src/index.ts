@@ -1,7 +1,7 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 
 // Comet Browser MCP Server
-// Claude Code ↔ Perplexity Comet bidirectional interaction
+// Claude Code â†” Perplexity Comet bidirectional interaction
 // Simplified to 6 essential tools
 
 // CLI dispatch: `comet-mcp discover|verify|list ...` runs the on-demand provider
@@ -25,7 +25,22 @@ import { cometClient } from "./cdp-client.js";
 import { tabRegistry } from "./tab-registry.js";
 import { sessionPool } from "./cdp-pool.js";
 import { getDriver, listDrivers, openTab, normalizePrompt, askAndWait, askAndWaitOn, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention, recordPollSuccess } from "./drivers/index.js";
-import { loadEntry, writeEntry } from "./core/registry.js";
+import { loadEntry, loadAllEntries, writeEntry } from "./core/registry.js";
+import type { ProviderId } from "./types/conversation.js";
+
+/**
+ * Known provider = has a ChatDriver (can ask/poll) OR a registry entry (tab can be
+ * opened/registered/closed â€” the P3 pool is provider-neutral, drivers are only needed
+ * for ask/poll/health).
+ */
+function knownProvider(provider: string): boolean {
+  return !!getDriver(provider) || loadEntry(provider as ProviderId) !== null;
+}
+
+/** List of providers addressable at the registry level (entry or driver). */
+function knownProviders(): string[] {
+  return [...new Set([...listDrivers(), ...loadAllEntries().keys()])];
+}
 
 // Retention sweep on startup (expired responses cleaned before serving).
 enforceRetention();
@@ -80,11 +95,11 @@ const TOOLS: Tool[] = [
   },
   {
     name: "provider_discover",
-    description: "Run the discovery workflow against a provider tab (inventory, one varied validation prompt, entry regeneration). Opt-in operational tool — requires the provider tab open in Comet. Use when provider_verify reports a missing hook or selectors drift.",
+    description: "Run the discovery workflow against a provider tab (inventory, one varied validation prompt, entry regeneration). Opt-in operational tool â€” requires the provider tab open in Comet. Use when provider_verify reports a missing hook or selectors drift.",
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude" },
+        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude, gemini, chatgpt, claude" },
         write: { type: "boolean", description: "Write the regenerated entry + fixtures (default: true)" },
         diff: { type: "boolean", description: "Show selector changes vs the committed entry (default: true)" },
       },
@@ -97,18 +112,18 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude" },
+        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude, gemini, chatgpt, claude" },
       },
       required: ["provider"],
     },
   },
   {
     name: "provider_open",
-    description: "Open (or reuse) a provider's tab and register it in the tab registry. Returns the tabId that other provider_* tools address. P3 tab addressing: providerKey → tabId.",
+    description: "Open (or reuse) a provider's tab and register it in the tab registry. Returns the tabId that other provider_* tools address. P3 tab addressing: providerKey â†’ tabId.",
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", description: "Provider name: perplexity, grok" },
+        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude" },
         newTab: { type: "boolean", description: "Force a fresh tab instead of reusing the existing provider tab (default: false)" },
       },
       required: ["provider"],
@@ -120,7 +135,7 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", description: "Provider name: perplexity, grok" },
+        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude" },
       },
       required: ["provider"],
     },
@@ -132,13 +147,13 @@ const TOOLS: Tool[] = [
   },
   {
     name: "provider_close",
-    description: "Close a provider tab (scoped — never touches sibling provider tabs). Last-tab protection: the LAST tab of a provider is reset instead of closed.",
+    description: "Close a provider tab (scoped â€” never touches sibling provider tabs). Last-tab protection: the LAST tab of a provider is reset instead of closed.",
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", description: "Provider name: perplexity, grok" },
-        tabId: { type: "string", description: "Specific tabId to close (optional — defaults to the provider's registered tab)" },
-        force: { type: "boolean", description: "Close even the last tab of a provider (default: false — last tab is reset instead)" },
+        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude" },
+        tabId: { type: "string", description: "Specific tabId to close (optional â€” defaults to the provider's registered tab)" },
+        force: { type: "boolean", description: "Close even the last tab of a provider (default: false â€” last tab is reset instead)" },
       },
     },
   },
@@ -148,8 +163,8 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", description: "Provider name: perplexity, grok" },
-        tabId: { type: "string", description: "Specific tabId (optional — defaults to the provider's registered tab)" },
+        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude" },
+        tabId: { type: "string", description: "Specific tabId (optional â€” defaults to the provider's registered tab)" },
       },
       required: ["provider"],
     },
@@ -160,7 +175,7 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", description: "Provider name: perplexity, grok" },
+        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude" },
         control: { type: "string", description: "Control name: composer, sendButton, modelPicker, newChat, responseContainer, ..." },
         selector: { type: "string", description: "CSS selector to force" },
         clear: { type: "boolean", description: "Clear the override for this control (default: false)" },
@@ -174,10 +189,10 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", description: "Provider name: perplexity, grok" },
+        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude" },
         prompt: { type: "string", description: "Question or task for the provider" },
         timeout: { type: "number", description: "Max wait time in ms (default: 15000)" },
-        tabId: { type: "string", description: "Specific tabId to ask in (optional — defaults to the provider's registered tab)" },
+        tabId: { type: "string", description: "Specific tabId to ask in (optional â€” defaults to the provider's registered tab)" },
         idempotencyKey: { type: "string", description: "Replay-safe key: re-sending with the same key returns the prior outcome, never a duplicate send (optional)" },
       },
       required: ["provider", "prompt"],
@@ -189,8 +204,8 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", description: "Provider name: perplexity, grok" },
-        tabId: { type: "string", description: "Specific tabId (optional — defaults to the provider's registered tab)" },
+        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude" },
+        tabId: { type: "string", description: "Specific tabId (optional â€” defaults to the provider's registered tab)" },
       },
       required: ["provider"],
     },
@@ -201,8 +216,8 @@ const TOOLS: Tool[] = [
     inputSchema: {
       type: "object",
       properties: {
-        provider: { type: "string", description: "Provider name: perplexity, grok" },
-        tabId: { type: "string", description: "Specific tabId (optional — defaults to the provider's registered tab)" },
+        provider: { type: "string", description: "Provider name: perplexity, grok, gemini, chatgpt, claude" },
+        tabId: { type: "string", description: "Specific tabId (optional â€” defaults to the provider's registered tab)" },
       },
       required: ["provider"],
     },
@@ -237,13 +252,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "comet_connect": {
         // Auto-start Comet with debug port (will restart if running without it)
         const startResult = await cometClient.startComet(9222);
-        // P3 (audit F5): do NOT close all tabs / navigate to Perplexity here — that
-        // destroys sibling provider tabs (ADR 0001 §Safeguards 2). Scoped open/close
+        // P3 (audit F5): do NOT close all tabs / navigate to Perplexity here â€” that
+        // destroys sibling provider tabs (ADR 0001 Â§Safeguards 2). Scoped open/close
         // lives in provider_open/provider_close. Report what's open instead.
         const targets = await cometClient.listTargets();
         const pageTabs = targets.filter(t => t.type === 'page');
         return {
-          content: [{ type: "text", text: `${startResult}\nComet ready. ${pageTabs.length} page tab(s) open. Use provider_open to open/register a provider tab (providerKey → tabId).` }],
+          content: [{ type: "text", text: `${startResult}\nComet ready. ${pageTabs.length} page tab(s) open. Use provider_open to open/register a provider tab (providerKey â†’ tabId).` }],
         };
       }
 
@@ -295,13 +310,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text", text: "Error: prompt cannot be empty" }] };
         }
         prompt = normalizePrompt(prompt);
-        // P3: address the session explicitly — reuse the registered tab unless a
+        // P3: address the session explicitly â€” reuse the registered tab unless a
         // specific tabId was requested.
         const idempotencyKey = args?.idempotencyKey ? String(args.idempotencyKey) : undefined;
         const tabId = String(args?.tabId ?? '');
         if (tabId) {
           const session = tabRegistry.get(tabId);
-          if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} — use provider_open first` }], isError: true };
+          if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} â€” use provider_open first` }], isError: true };
           const outcome = await askAndWaitOn(driver, session, prompt, timeout, { idempotencyKey });
           if (outcome.completed) {
             return { content: [{ type: "text", text: compactAskResult(provider, outcome) }] };
@@ -322,7 +337,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
         const tabId = String(args?.tabId ?? '');
         const session = tabId ? tabRegistry.get(tabId) : await openTab(provider);
-        if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} — use provider_open first` }], isError: true };
+        if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} â€” use provider_open first` }], isError: true };
         const poll = await driver.poll(session);
         recordPollSuccess(session.targetId);
         return { content: [{ type: "text", text: renderPoll(poll, provider) }] };
@@ -334,7 +349,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
         const tabId = String(args?.tabId ?? '');
         const session = tabId ? tabRegistry.get(tabId) : await openTab(provider);
-        if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} — use provider_open first` }], isError: true };
+        if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} â€” use provider_open first` }], isError: true };
         const stopped = await driver.stop(session);
         return {
           content: [{
@@ -363,7 +378,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "comet_mode": {
         const mode = args?.mode as string | undefined;
-        // P3: comet_mode is Perplexity-specific — address the registered Perplexity
+        // P3: comet_mode is Perplexity-specific â€” address the registered Perplexity
         // tab via its pooled session, falling back to the global client.
         const session = tabRegistry.getProviderTab('perplexity');
         const handle = session ? sessionPool.get(session.targetId) : null;
@@ -409,7 +424,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           let output = `Current mode: ${currentMode}\n\nAvailable modes:\n`;
           for (const [m, desc] of Object.entries(descriptions)) {
-            const marker = m === currentMode ? "→" : " ";
+            const marker = m === currentMode ? "â†’" : " ";
             output += `${marker} ${m}: ${desc}\n`;
           }
 
@@ -502,12 +517,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "provider_reconnect": {
         const provider = String(args?.provider ?? '');
-        const driver = getDriver(provider);
-        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        if (!knownProvider(provider)) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${knownProviders().join(', ')})` }], isError: true };
         try {
-          const session = await tabRegistry.reconnect(driver.provider);
+          const session = await tabRegistry.reconnect(provider as ProviderId);
           const cursor = session.extractionCursor ?? 'none';
-          return { content: [{ type: "text", text: `provider_reconnect ${provider}: tabId=${session.tabId} state=${session.state} durableCursor=${cursor} — dedup anchors re-hydrated (unchanged content → no new response event)` }] };
+          return { content: [{ type: "text", text: `provider_reconnect ${provider}: tabId=${session.tabId} state=${session.state} durableCursor=${cursor} â€” dedup anchors re-hydrated (unchanged content â†’ no new response event)` }] };
         } catch (error) {
           return { content: [{ type: "text", text: `provider_reconnect failed: ${error instanceof Error ? error.message : error}` }], isError: true };
         }
@@ -515,11 +529,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "provider_open": {
         const provider = String(args?.provider ?? '');
-        const driver = getDriver(provider);
-        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        if (!knownProvider(provider)) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${knownProviders().join(', ')})` }], isError: true };
         try {
-          const session = await openTab(provider, { newTab: args?.newTab === true });
-          return { content: [{ type: "text", text: `provider_open ${provider}: tabId=${session.tabId} state=${session.state} session=${session.cdpSessionId.slice(0, 40)}…` }] };
+          const session = await tabRegistry.open(provider as ProviderId, { newTab: args?.newTab === true });
+          return { content: [{ type: "text", text: `provider_open ${provider}: tabId=${session.tabId} state=${session.state} session=${session.cdpSessionId.slice(0, 40)}â€¦` }] };
         } catch (error) {
           return { content: [{ type: "text", text: `provider_open failed: ${error instanceof Error ? error.message : error}` }], isError: true };
         }
@@ -527,7 +540,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "provider_list": {
         const sessions = tabRegistry.list();
-        if (sessions.length === 0) return { content: [{ type: "text", text: "no provider tabs registered — use provider_open" }] };
+        if (sessions.length === 0) return { content: [{ type: "text", text: "no provider tabs registered â€” use provider_open" }] };
         const lines = sessions.map((s) =>
           `  ${s.provider.padEnd(10)} tabId=${s.tabId}  ${s.state}  opened=${s.openedAt}` +
           (s.lastCompletedAt ? `  lastCompleted=${s.lastCompletedAt}` : '') +
@@ -538,23 +551,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "provider_close": {
         const provider = String(args?.provider ?? '');
-        const driver = getDriver(provider);
-        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        if (!knownProvider(provider)) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${knownProviders().join(', ')})` }], isError: true };
         const tabId = String(args?.tabId ?? '');
-        const session = tabId ? tabRegistry.get(tabId) : tabRegistry.getProviderTab(driver.provider);
-        if (!session) return { content: [{ type: "text", text: `no registered tab for ${provider} — use provider_open first` }], isError: true };
+        const session = tabId ? tabRegistry.get(tabId) : tabRegistry.getProviderTab(provider as ProviderId);
+        if (!session) return { content: [{ type: "text", text: `no registered tab for ${provider} â€” use provider_open first` }], isError: true };
         const { closed, reset } = await tabRegistry.close(session.targetId, { force: args?.force === true });
-        if (reset) return { content: [{ type: "text", text: `${provider}: last-tab protection — tab reset instead of closed (sibling provider tabs untouched)` }] };
+        if (reset) return { content: [{ type: "text", text: `${provider}: last-tab protection â€” tab reset instead of closed (sibling provider tabs untouched)` }] };
         return { content: [{ type: "text", text: closed ? `${provider} tab closed (tabId=${session.targetId})` : `${provider} tab ${session.targetId} not closed (not pooled?)` }] };
       }
 
       case "provider_health": {
         const provider = String(args?.provider ?? '');
         const driver = getDriver(provider);
-        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        if (!driver) return { content: [{ type: "text", text: `No ChatDriver for ${provider} yet (P6) â€” use provider_verify for entry-level health (all 5 entries exist)` }], isError: true };
         const tabId = String(args?.tabId ?? '');
         const session = tabId ? tabRegistry.get(tabId) : tabRegistry.getProviderTab(driver.provider);
-        if (!session) return { content: [{ type: "text", text: `no registered tab for ${provider} — use provider_open first` }], isError: true };
+        if (!session) return { content: [{ type: "text", text: `no registered tab for ${provider} â€” use provider_open first` }], isError: true };
         const health = await driver.health(session);
         let text = `${provider} health (tabId=${session.targetId}): ${health.healthy ? 'HEALTHY' : 'DEGRADED'}${health.loginRequired ? ' LOGIN_REQUIRED' : ''}\n`;
         for (const c of health.hookResolution) text += `  [${c.source}] ${c.control}\n`;
@@ -567,12 +579,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const control = String(args?.control ?? '');
         const selector = String(args?.selector ?? '');
         const clear = args?.clear === true;
-        const driver = getDriver(provider);
-        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        if (!knownProvider(provider)) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${knownProviders().join(', ')})` }], isError: true };
         if (!control) return { content: [{ type: "text", text: 'Error: control required (composer, sendButton, modelPicker, newChat, responseContainer, ...)' }], isError: true };
         if (!clear && !selector) return { content: [{ type: "text", text: 'Error: selector required (or pass clear=true)' }], isError: true };
-        const entry = loadEntry(provider as any);
-        if (!entry) return { content: [{ type: "text", text: `no entry for ${provider} — run provider_discover first` }], isError: true };
+        const entry = loadEntry(provider as ProviderId);
+        if (!entry) return { content: [{ type: "text", text: `no entry for ${provider} â€” run provider_discover first` }], isError: true };
         const controls = (entry.controls ?? {}) as Record<string, any>;
         if (clear) {
           delete controls[control];
@@ -595,7 +606,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const result = await runDiscovery(provider, { write });
           let text = `provider_discover ${provider}: state=${result.endedState} confidence=${result.confidence}\n` +
-            `prompt: "${result.validationPrompt}" → expected "${result.expectedToken}"\n` +
+            `prompt: "${result.validationPrompt}" â†’ expected "${result.expectedToken}"\n` +
             `submit: ${result.submitMethod?.method ?? '?'}${result.submitMethod?.selector ? ' via ' + result.submitMethod.selector : ''}\n` +
             (result.wroteEntry ? `entry written: ${result.entryPath}\n` : 'entry NOT written\n') +
             `fixtures: ${Object.keys(result.fixtures).join(', ') || '(none)'}`;
@@ -619,11 +630,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         try {
           const result = await verifyProvider(provider);
           if (!result.tabFound) {
-            return { content: [{ type: "text", text: `No ${provider} tab found — open the provider tab in Comet first` }], isError: true };
+            return { content: [{ type: "text", text: `No ${provider} tab found â€” open the provider tab in Comet first` }], isError: true };
           }
           let text = `${provider} verify (no prompt sent):\n`;
           for (const c of result.checks) text += `  [${c.ok ? 'OK' : 'MISS'}] ${c.name}: ${c.selector}${c.conditional ? ' (conditional)' : ''}\n`;
-          text += result.healthy ? 'HEALTHY' : 'UNHEALTHY — re-run: provider_discover ' + provider;
+          text += result.healthy ? 'HEALTHY' : 'UNHEALTHY â€” re-run: provider_discover ' + provider;
           return { content: [{ type: "text", text }] };
         } catch (error) {
           return { content: [{ type: "text", text: `provider_verify failed: ${error instanceof Error ? error.message : error}` }], isError: true };
