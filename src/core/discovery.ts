@@ -19,7 +19,7 @@ import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { ENTRIES_DIR, writeEntry, validateEntry, packageRoot, recordSuccess, recordFailure, confidenceStart } from './registry.js';
-import { resolveWithRebind, fingerprintOf } from './fingerprint.js';
+import { resolveWithRebind, fingerprintOf, isEphemeralId } from './fingerprint.js';
 import type { ProviderEntry, ProviderState } from '../types/provider.js';
 import type { ProviderId } from '../types/conversation.js';
 
@@ -278,8 +278,14 @@ const INVENTORY = `(() => {
       const tag = el.tagName.toLowerCase();
       if (el.matches('textarea, [contenteditable="true"], [role="textbox"]') || (el.getAttribute('data-testid') || '').toLowerCase().includes('input')) {
         const i = ident(el);
-        const snippet = (el.innerText || '').replace(/\\s+/g, ' ').slice(0, 40);
-        out.composer.push({ tag, ...i, snippet });
+        const snippet = (el.innerText || '').replace(/\s+/g, ' ').slice(0, 40);
+        // rank signal: prefer VISIBLE contenteditable/role=textbox over hidden
+        // aux textareas (fix 2026-08-07: claude's real composer is a contenteditable
+        // div, but a hidden 0x0 a11y textarea sits first in DOM order and was being
+        // selected — discovery typed into it and Enter never submitted).
+        const visible = !!el.offsetParent && el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0;
+        const contentEditable = el.isContentEditable || (el.getAttribute('contenteditable') === 'true');
+        out.composer.push({ tag, ...i, snippet, __visible: visible ? 1 : 0, __editable: contentEditable ? 1 : 0 });
       }
       if (el.matches('button, [role="button"]')) {
         const i = ident(el);
@@ -301,7 +307,12 @@ const INVENTORY = `(() => {
   walk(document);
   out.buttonsAll = out.buttons;
   out.buttons = out.buttons.filter(b => b.id || b.testid || b.aria || b.text || b.hasIcon).slice(0, 60);
-  out.composer = out.composer.filter(c => c.id || c.testid || c.aria || c.placeholder || c.role).slice(0, 20);
+  // composer ranking: visible contenteditable first, then visible textbox, then
+  // visible textarea, then hidden (fix 2026-08-07 — hidden a11y textareas must lose)
+  out.composer = out.composer
+    .sort((a, b) => (b.__visible + b.__editable) - (a.__visible + a.__editable) || ((a.__editable === 1 ? 0 : 1) - (b.__editable === 1 ? 0 : 1)))
+    .filter(c => c.id || c.testid || c.aria || c.placeholder || c.role)
+    .slice(0, 20);
   out.responses = out.responses.filter(r => r.textLen > 0).slice(0, 30);
   return out;
   } catch (e) { return { __error: String(e && e.stack || e) }; }
@@ -322,7 +333,9 @@ const SNAPSHOT = (rootSel: string | null) => `(() => {
 function bestSelector(c: any): string | null {
   const escToken = (s: string) => String(s).replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch);
   const escAttr = (s: string) => JSON.stringify(String(s));
-  if (c.id) return `#${escToken(c.id)}`;
+  // fix 2026-08-07: skip ephemeral framework ids (React/Radix rotate per render) —
+  // prefer stable identity (testid/aria/placeholder/classes) over a doomed #id
+  if (c.id && !isEphemeralId(c.id)) return `#${escToken(c.id)}`;
   if (c.testid) return `[data-testid=${escAttr(c.testid)}]`;
   if (c.aria) return `[aria-label=${escAttr(c.aria)}]`;
   if (c.placeholder) return `[placeholder=${escAttr(c.placeholder)}]`;
@@ -350,6 +363,8 @@ export interface DiscoveryResult {
   findings: string[];
   wroteEntry: boolean;
   entryPath?: string;
+  /** Downgrade guard (2026-08-07): set when an existing entry was strictly better. */
+  guarded?: { existingBetter: boolean; reason: string };
 }
 
 // ---------- main flow ----------
@@ -384,12 +399,22 @@ export async function runDiscovery(
     return !/mode-toggle|indicator|wrapper|chevron|width|slot|prefix|suffix/.test(blob);
   };
   const real = inv.composer.filter(isRealComposer);
-  const composer = real.find((c: any) => c.tag === 'textarea')
+  const composer =
+    // fix 2026-08-07: prefer VISIBLE contenteditable composers (claude's real
+    // composer is a contenteditable div; a hidden 0x0 a11y textarea was selected
+    // first and Enter never submitted). Ranking prefers visible+editable, then
+    // id/testid/aria/placeholder heuristics.
+    real.find((c: any) => c.__visible === 1 && c.__editable === 1)
+    || real.find((c: any) => c.__visible === 1 && c.id && /input|composer|prompt|editor/i.test(c.id))
+    || real.find((c: any) => c.__visible === 1 && c.testid && /composer|input|prompt/i.test(c.testid))
+    || real.find((c: any) => c.__visible === 1 && c.aria && /composer|message|prompt|ask/i.test(c.aria))
+    || real.find((c: any) => c.__visible === 1 && c.placeholder)
+    || real.find((c: any) => c.__visible === 1 && !/mode-toggle|indicator|wrapper|chevron|width|slot|prefix|suffix/.test(((c.id || '') + ' ' + (c.testid || '') + ' ' + (c.aria || '')).toLowerCase()))
     || real.find((c: any) => c.id && /input|composer|prompt|editor/i.test(c.id))
     || real.find((c: any) => c.testid && /composer|input|prompt/i.test(c.testid))
     || real.find((c: any) => c.aria && /composer|message|prompt|ask/i.test(c.aria))
     || real.find((c: any) => c.placeholder)
-    || inv.composer.find((c: any) => !/mode-toggle|indicator|wrapper|chevron|width|slot|prefix|suffix/.test(((c.id || '') + ' ' + (c.testid || '') + ' ' + (c.aria || '')).toLowerCase()))
+    || real[0]
     || inv.composer[0];
   if (!composer) { s.close(); throw new Error('no composer found'); }
   const composerSel = bestSelector(composer)!;
@@ -432,7 +457,8 @@ export async function runDiscovery(
       return /send|submit|arrow/.test(a + tid) || b.getAttribute('type') === 'submit';
     });
     return cands.map(b => ({
-      sel: (b.id ? '#' + b.id : '') + (b.getAttribute('data-testid') ? '[data-testid="' + b.getAttribute('data-testid') + '"]' : '') +
+      // isEphemeralId inlined for the page context (imports don't cross into CDP)
+      sel: (b.id && !/^(base-ui-|radix-|_r_)/.test(b.id) && !/_r_/.test(b.id) ? '#' + b.id : '') + (b.getAttribute('data-testid') ? '[data-testid="' + b.getAttribute('data-testid') + '"]' : '') +
            (b.getAttribute('aria-label') ? '[aria-label="' + b.getAttribute('aria-label') + '"]' : ''),
       aria: b.getAttribute('aria-label') || '', testid: b.getAttribute('data-testid') || '',
       text: (b.innerText || '').trim().slice(0, 30), type: b.getAttribute('type') || '',
@@ -506,6 +532,26 @@ export async function runDiscovery(
       })()`);
     } catch { /* optional */ }
   }
+
+  // ADR 0003 fix (2026-08-07): seed structural fingerprints for EVERY control at
+  // discovery time, while the live page is still attached. Previously fingerprints
+  // were only captured on a successful verify resolve — a control whose selector
+  // breaks on the first re-render (e.g. a rotating React id) could therefore never
+  // acquire a fingerprint, and the rebind path (guarded on fingerprint !== 0) was
+  // permanently dead. Seeding here gives self-healing its anchor from day one.
+  const seedFingerprint = async (selector: string | null | undefined): Promise<number> => {
+    if (!selector) return 0;
+    try {
+      const v = await s.evaluate(fingerprintOf(selector));
+      return typeof v === 'number' && v !== 0 ? v : 0;
+    } catch { return 0; }
+  };
+  const seededFingerprints = {
+    composer: await seedFingerprint(composerSel),
+    sendButton: await seedFingerprint(sendSel),
+    modelPicker: await seedFingerprint(modelPicker ? bestSelector(modelPicker) : null),
+    newChat: await seedFingerprint(newChat ? bestSelector(newChat) : null),
+  };
   s.close();
 
   // 6. build + persist entry
@@ -515,10 +561,10 @@ export async function runDiscovery(
 
   const controls: any = {};
   const seedConf = confidenceStart(confidence);
-  if (composer) controls.composer = { selector: composerSel, confidence: seedConf, success_count: 0, fail_count: 0, ...composer };
-  if (sendSel) controls.sendButton = { selector: sendSel, confidence: seedConf, success_count: 0, fail_count: 0 };
-  if (modelPicker) controls.modelPicker = { selector: bestSelector(modelPicker), confidence: seedConf, success_count: 0, fail_count: 0, ...modelPicker };
-  if (newChat) controls.newChat = { selector: bestSelector(newChat), confidence: seedConf, success_count: 0, fail_count: 0, ...newChat };
+  if (composer) controls.composer = { selector: composerSel, confidence: seedConf, success_count: 0, fail_count: 0, ...composer, fingerprint: seededFingerprints.composer };
+  if (sendSel) controls.sendButton = { selector: sendSel, confidence: seedConf, success_count: 0, fail_count: 0, fingerprint: seededFingerprints.sendButton };
+  if (modelPicker) controls.modelPicker = { selector: bestSelector(modelPicker), confidence: seedConf, success_count: 0, fail_count: 0, ...modelPicker, fingerprint: seededFingerprints.modelPicker };
+  if (newChat) controls.newChat = { selector: bestSelector(newChat), confidence: seedConf, success_count: 0, fail_count: 0, ...newChat, fingerprint: seededFingerprints.newChat };
   if (cfg.responseSelectors.length) {
     controls.responseContainer = {
       selector: cfg.responseSelectors[0],
@@ -554,6 +600,39 @@ export async function runDiscovery(
   let wroteEntry = false;
   let entryPath: string | undefined;
   if (opts.write !== false) {
+    // Downgrade guard (fix 2026-08-07): a low-confidence / partial discovery run
+    // must not overwrite a strictly-better existing entry. Found live: a claude
+    // run ended 'streaming/low', lost sendButton entirely, dropped conditional
+    // flags, and flattened confidence to 0.3 — clobbering the committed HIGH
+    // entry. Guard: refuse when the existing entry is strictly better.
+    const existing = loadEntryFile(provider);
+    const existingControlCount = existing ? Object.keys(existing.controls ?? {}).length : 0;
+    const newControlCount = Object.keys(controls).length;
+    const newHasSendButton = !!controls.sendButton;
+    const existingHasSendButton = !!existing?.controls?.sendButton;
+    const confidenceRank = { high: 3, medium: 2, low: 1 } as const;
+    const existingBetter =
+      existing && (
+        (existingHasSendButton && !newHasSendButton) ||
+        (existingControlCount > newControlCount) ||
+        (confidenceRank[existing.confidence] > confidenceRank[confidence])
+      );
+    if (existingBetter) {
+      const why = [
+        existingHasSendButton && !newHasSendButton ? `existing has sendButton, new run lost it` : '',
+        existingControlCount > newControlCount ? `existing ${existingControlCount} controls > new ${newControlCount}` : '',
+        confidenceRank[existing.confidence] > confidenceRank[confidence] ? `existing ${existing.confidence} > new ${confidence}` : '',
+      ].filter(Boolean).join('; ');
+      console.warn(`[discovery] NOT overwriting ${provider}: ${why}. Existing entry kept.`);
+      wroteEntry = false;
+      entryPath = undefined;
+      return {
+        provider, url: target.url, endedState: state, confidence,
+        validationPrompt: VALIDATION_PROMPT, expectedToken: EXPECTED_TOKEN,
+        submitMethod, entry, fixtures, findings, wroteEntry, entryPath,
+        guarded: { existingBetter: true, reason: why } as any,
+      };
+    }
     entryPath = writeEntry(entry);
     wroteEntry = true;
     mkdirSync(fixturesDir, { recursive: true });

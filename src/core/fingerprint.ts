@@ -15,6 +15,18 @@
 /** FNV-1a 32-bit — in-page, deterministic, cheap. Mirrors Bladebro's JS_FNV_FN. */
 export const FNV_FN_JS = `function __fnv(s){let h=0x811c9dc5;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0}return h}`;
 
+/**
+ * Ephemeral framework-generated IDs (React/Radix/Base UI): `_r_`, `base-ui-_r_`,
+ * `radix-…` — they rotate on every re-render and must never be used as a primary
+ * selector or rebind target. Structural fingerprints ignore them by construction;
+ * this guard keeps them out of selector-building too (fix 2026-08-07: claude
+ * modelPicker was stored as `#base-ui-_r_cp_` and broke on the first render).
+ */
+export function isEphemeralId(id: string | null | undefined): boolean {
+  if (!id) return false;
+  return /^(base-ui-|radix-|_r_)/.test(id) || /_r_/.test(id);
+}
+
 /** Ancestor chain string: tag[index]>tag[index]>... up to 10 levels (Bladebro JS_NC_FN). */
 export const ANCESTOR_CHAIN_JS = `function __nc(n){const c=[];let cur=n;for(let d=0;d<10&&cur;d++){c.push(cur.tagName?cur.tagName.toLowerCase():'unk');const p=cur.parentElement;if(p){c.push(''+Array.prototype.indexOf.call(p.children,cur));cur=p}else break}return c.join('>')}`;
 
@@ -97,7 +109,8 @@ export interface RebindResult {
 export function selectorFromElement(summary: any): string | null {
   if (!summary) return null;
   const esc = (s: string) => String(s).replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch);
-  if (summary.id) return `#${esc(summary.id)}`;
+  // fix 2026-08-07: never rebind onto an ephemeral framework id (rotates next render)
+  if (summary.id && !isEphemeralId(summary.id)) return `#${esc(summary.id)}`;
   if (summary.testid) return `[data-testid="${esc(summary.testid)}"]`;
   if (summary.aria) return `[aria-label="${esc(summary.aria)}"]`;
   if (summary.name) return `[name="${esc(summary.name)}"]`;

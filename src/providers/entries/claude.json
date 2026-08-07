@@ -40,7 +40,7 @@
       "condition": "rendered only after composer has text"
     },
     "modelPicker": {
-      "selector": "#base-ui-_r_cp_",
+      "selector": "[data-testid=\"model-selector-dropdown\"]",
       "tag": "button",
       "id": "base-ui-_r_cp_",
       "testid": "model-selector-dropdown",
@@ -57,7 +57,7 @@
       "confidence": 0.29999999999999993,
       "success_count": 0,
       "fail_count": 4,
-      "fingerprint": 0,
+      "fingerprint": 118280991,
       "last_validated": 1786123602
     },
     "responseContainer": {

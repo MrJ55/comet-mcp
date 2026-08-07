@@ -627,6 +627,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             `prompt: "${result.validationPrompt}" â†’ expected "${result.expectedToken}"\n` +
             `submit: ${result.submitMethod?.method ?? '?'}${result.submitMethod?.selector ? ' via ' + result.submitMethod.selector : ''}\n` +
             (result.wroteEntry ? `entry written: ${result.entryPath}\n` : 'entry NOT written\n') +
+            (result.guarded?.existingBetter ? `⚠ NOT overwritten (downgrade guard): ${result.guarded.reason}\n` : '') +
             `fixtures: ${Object.keys(result.fixtures).join(', ') || '(none)'}`;
           if (diff && result.wroteEntry) {
             const d = diffEntry(provider, result.entry);
