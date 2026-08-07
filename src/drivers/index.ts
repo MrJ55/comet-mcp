@@ -10,6 +10,9 @@
 
 import type { ChatDriver, PollResult, TabSession } from '../types/provider.js';
 import type { ProviderId } from '../types/conversation.js';
+import { writeFileSync, mkdirSync } from 'fs';
+import { join } from 'path';
+import { packageRoot } from '../core/registry.js';
 import { perplexityDriver } from './perplexity.js';
 import { grokDriver } from './grok.js';
 
@@ -49,10 +52,47 @@ export function normalizePrompt(prompt: string): string {
     .trim();
 }
 
+/**
+ * Persist a full provider response (text + markdown) to the outputs dir and return
+ * a compact result that fits small MCP-gateway result budgets (~500 bytes). The full
+ * content is always available at the returned path — the gateway cap does not limit
+ * what the client can retrieve (2026-08-07 finding: pi's gateway truncates tool
+ * results at a few hundred bytes, so long responses must be file-backed, not inline).
+ */
+export function persistResponse(provider: string, poll: PollResult): { text: string; path: string; bytes: number } {
+  const dir = join(packageRoot(), 'responses');
+  mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const path = join(dir, `${provider}-${stamp}.md`);
+  const body = `# ${provider} response (${stamp})\n\n${poll.response}\n\n---\n\n## Markdown\n\n${poll.markdown ?? '(none)'}\n`;
+  writeFileSync(path, body);
+  return { text: body, path, bytes: Buffer.byteLength(body, 'utf8') };
+}
+
+/** Compact inline preview (fits the gateway budget) + path for the full content. */
+export function compactResult(poll: PollResult, path: string): string {
+  const preview = poll.response.slice(0, 200);
+  return `Status: ${poll.state}\nPreview: ${preview}${poll.response.length > 200 ? '…' : ''}\nFull (${poll.response.length} chars + markdown): ${path}`;
+}
+
+/** Persist a completed AskOutcome and return the compact tool-result string. */
+export function compactAskResult(provider: string, outcome: AskOutcome): string {
+  const dir = join(packageRoot(), 'responses');
+  mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const path = join(dir, `${provider}-ask-${stamp}.md`);
+  const body = `# ${provider} response (${stamp})\n\n${outcome.response}\n\n---\n\n## Markdown\n\n${outcome.markdown ?? '(none)'}\n`;
+  writeFileSync(path, body);
+  const preview = outcome.response.slice(0, 200);
+  return `Completed (${outcome.response.length} chars).\nPreview: ${preview}${outcome.response.length > 200 ? '…' : ''}\nFull response: ${path}`;
+}
+
 /** Poll once and render the human/progress view (shared by poll tools). */
-export function renderPoll(poll: PollResult): string {
+export function renderPoll(poll: PollResult, provider = 'provider'): string {
   if (poll.state === 'completed' && poll.response) {
-    return poll.response + (poll.markdown ? `\n\n---\n\n${poll.markdown}` : '');
+    // Full content goes to a file; the tool result stays compact (gateway cap).
+    const { path, bytes } = persistResponse(provider, poll);
+    return compactResult(poll, path) + ` (${bytes} bytes written)`;
   }
   let out = `Status: ${poll.state.toUpperCase()}\n`;
   if (poll.agentBrowsingUrl) out += `Browsing: ${poll.agentBrowsingUrl}\n`;
@@ -70,12 +110,21 @@ export function renderPoll(poll: PollResult): string {
  */
 export async function askAndWait(driver: ChatDriver, prompt: string, timeoutMs: number): Promise<AskOutcome> {
   const session: TabSession = await driver.open();
+
+  // Snapshot the conversation state BEFORE sending so we can detect the NEW
+  // response reliably (a follow-up in an existing thread already has prior text
+  // in the DOM — "any text exists" is not "this turn completed").
+  const before = await driver.poll(session);
+  const beforeHash = before.contentHash ?? simpleHash(before.response);
+  const beforeLen = before.response.length;
+
   await driver.ask(session, prompt);
 
   const startTime = Date.now();
   const stepsCollected: string[] = [];
   let sawNewResponse = false;
   let last: PollResult | null = null;
+  let prevHash: string | null = null; // for stability check: two identical readings = done
 
   while (Date.now() - startTime < timeoutMs) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -83,8 +132,17 @@ export async function askAndWait(driver: ChatDriver, prompt: string, timeoutMs: 
     for (const step of last.steps) {
       if (!stepsCollected.includes(step)) stepsCollected.push(step);
     }
-    if (last.response.length > 0) sawNewResponse = true;
-    if ((last.state === 'completed') && sawNewResponse) {
+    // NEW response = content hash changed OR text grew past the pre-send snapshot.
+    // Do NOT latch on mere presence of text (prior turns already have text).
+    const hash = last.contentHash ?? simpleHash(last.response);
+    if (last.response.length > 0 && (hash !== beforeHash || last.response.length > beforeLen)) {
+      sawNewResponse = true;
+    }
+    // COMPLETED requires stability: the response hash must be unchanged from the
+    // PREVIOUS poll. A single 'completed' reading can catch the DOM mid-render
+    // (the "Worked for Xs" marker appears while the list is still appending), so
+    // returning on first completed can truncate. Require two identical readings.
+    if (last.state === 'completed' && sawNewResponse && hash === prevHash && prevHash !== null) {
       return {
         completed: true,
         response: last.response || 'Task completed (no response text extracted)',
@@ -96,6 +154,7 @@ export async function askAndWait(driver: ChatDriver, prompt: string, timeoutMs: 
         timedOut: false,
       };
     }
+    prevHash = hash;
   }
 
   const final = last ?? await driver.poll(session);
@@ -109,6 +168,13 @@ export async function askAndWait(driver: ChatDriver, prompt: string, timeoutMs: 
     agentBrowsingUrl: final.agentBrowsingUrl,
     timedOut: true,
   };
+}
+
+/** FNV-1a content hash — same as the drivers use for PollResult.contentHash. */
+function simpleHash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16);
 }
 
 /** Render the "still in progress" view (preserves comet_ask's message shape). */

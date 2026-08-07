@@ -22,7 +22,7 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { cometClient } from "./cdp-client.js";
-import { getDriver, listDrivers, normalizePrompt, askAndWait, renderPoll, renderInProgress } from "./drivers/index.js";
+import { getDriver, listDrivers, normalizePrompt, askAndWait, renderPoll, renderInProgress, compactAskResult } from "./drivers/index.js";
 
 const TOOLS: Tool[] = [
   {
@@ -191,7 +191,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // comet_* = Perplexity alias over the generic ask-and-wait (P1 migration path)
         const outcome = await askAndWait(getDriver('perplexity')!, prompt, timeout);
         if (outcome.completed) {
-          return { content: [{ type: "text", text: outcome.response + (outcome.markdown ? `\n\n---\n\n${outcome.markdown}` : '') }] };
+          return { content: [{ type: "text", text: compactAskResult('perplexity', outcome) }] };
         }
         return { content: [{ type: "text", text: renderInProgress(outcome, true) }] };
       }
@@ -200,7 +200,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const driver = getDriver('perplexity')!;
         const session = await driver.open();
         const poll = await driver.poll(session);
-        return { content: [{ type: "text", text: renderPoll(poll) }] };
+        return { content: [{ type: "text", text: renderPoll(poll, 'perplexity') }] };
       }
 
       case "comet_stop": {
@@ -227,7 +227,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         prompt = normalizePrompt(prompt);
         const outcome = await askAndWait(driver, prompt, timeout);
         if (outcome.completed) {
-          return { content: [{ type: "text", text: outcome.response + (outcome.markdown ? `\n\n---\n\n${outcome.markdown}` : '') }] };
+          return { content: [{ type: "text", text: compactAskResult(provider, outcome) }] };
         }
         return { content: [{ type: "text", text: renderInProgress(outcome) }] };
       }
@@ -238,7 +238,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
         const session = await driver.open();
         const poll = await driver.poll(session);
-        return { content: [{ type: "text", text: renderPoll(poll) }] };
+        return { content: [{ type: "text", text: renderPoll(poll, provider) }] };
       }
 
       case "provider_stop": {
