@@ -267,13 +267,13 @@ For each provider:
 **Outcome:** discovery-to-runtime pipeline proven against a materially different UI.
 
 - [x] Run the discovery workflow against Grok. (and all other providers — see P2 note)
-- [ ] Implement composer, send, stop, response extraction, reset, and health handling.
-- [ ] Use correct CDP insertion/key behavior for Grok’s editor.
-- [ ] Decide and test markdown extraction strategy.
-- [x] Add fixture-driven tests and live `PONG` validation. (live validation done; fixture-driven tests pending)
+- [x] Implement composer, send, stop, response extraction, reset, and health handling. (`src/drivers/grok.ts`, mirror of Perplexity driver; live gate PASSED 2026-08-07)
+- [x] Use correct CDP insertion/key behavior for Grok’s editor. (execCommand into contenteditable `chat-input` — live-validated)
+- [x] Decide and test markdown extraction strategy. (`src/providers/markdown.ts` — innerHTML + turndown in Node, provider-neutral; live markdown bullets from grok.com confirmed)
+- [x] Add fixture-driven tests and live `PONG` validation. (live validations done for all 5 providers; 28 unit tests incl. fixture-driven `test/unit/fixture-driven.test.ts` against real captured DOM)
 - [x] Record operation confidence and capability evidence. (HIGH-confidence entries for all 5 providers; `src/providers/entries/*.json`)
 
-**Note (2026-08-07):** the discovery workflow was generalized and run against **all five** providers — Perplexity, Grok, Gemini, ChatGPT, Claude — producing HIGH-confidence entries (ACk/ALPHA/OK/BRAVO/PONG validations). Discovery is now a shipped tool (CLI `comet-mcp discover|verify|list` + MCP tools, PR #10, ADR 0002). Adapter *implementations* (ask/poll/stop/extraction) remain pending.
+**Note (2026-08-07):** the discovery workflow was generalized and run against **all five** providers — Perplexity, Grok, Gemini, ChatGPT, Claude — producing HIGH-confidence entries (ACk/ALPHA/OK/BRAVO/PONG validations). Discovery is now a shipped tool (CLI `comet-mcp discover|verify|list` + MCP tools, PR #10, ADR 0002). Perplexity and Grok drivers are implemented and live-validated; Gemini/ChatGPT/Claude adapters remain (P6).
 
 ### P3 — Multi-tab control plane
 
