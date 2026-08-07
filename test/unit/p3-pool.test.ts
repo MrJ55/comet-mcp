@@ -7,7 +7,8 @@ import { test } from 'node:test';
 import {
   pollDelayFor, recordPollSuccess, recordPollFailure, isCircuitOpen,
 } from '../../dist/drivers/index.js';
-import { TabCapExceededError, DEFAULT_TAB_CAP } from '../../dist/cdp-pool.js';
+import { TabCapExceededError, DEFAULT_TAB_CAP, sessionPool } from '../../dist/cdp-pool.js';
+import { tabRegistry } from '../../dist/tab-registry.js';
 
 test('P3 backoff: base delay 2s, doubles per failure, caps at 15s', () => {
   assert.equal(pollDelayFor('tab-a'), 2000);
@@ -43,4 +44,25 @@ test('P3 cap: TabCapExceededError carries the cap and a clear code', () => {
 
 test('P3 cap default is 5 (P0 measured safe limit)', () => {
   assert.equal(DEFAULT_TAB_CAP, 5);
+});
+
+test('P3 cap guard: open() at cap throws BEFORE creating a browser tab (no orphan leak)', async () => {
+  // registry.open() checks sessionPool.size >= cap BEFORE openNewProviderTab;
+  // simulating a full pool must therefore throw without any browser side effect.
+  // (Found live 2026-08-07: the 6th open created an orphan claude tab before the
+  // pool acquire threw — fixed by moving the cap guard before tab creation.)
+  assert.ok(sessionPool.size <= sessionPool.cap, 'test precondition: pool not over cap');
+  // monkeypatch the pool to report full — open() must reject on the guard alone
+  const origDesc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(sessionPool), 'size') ??
+    Object.getOwnPropertyDescriptor(sessionPool, 'size');
+  Object.defineProperty(sessionPool, 'size', { get: () => sessionPool.cap, configurable: true });
+  try {
+    await assert.rejects(
+      () => tabRegistry.open('grok', { newTab: true }),
+      (err: unknown) => err instanceof TabCapExceededError && err.message.includes('tab_cap_exceeded'),
+      'open() at cap must throw TabCapExceededError before tab creation',
+    );
+  } finally {
+    if (origDesc) Object.defineProperty(sessionPool, 'size', origDesc);
+  }
 });
