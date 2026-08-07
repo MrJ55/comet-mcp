@@ -260,7 +260,7 @@ For each provider:
 - [x] Add a migration path from `comet_*` to `provider_*`. (compat layer: `legacySendPrompt`/`legacyGetAgentStatus`/`legacyStopAgent` in `src/drivers/perplexity.ts` keep `comet_*` tools working over the driver; `provider_*` tool renames arrive with P3's provider_open/list/close/health)
 - [x] Implement conservative Perplexity defaults: relay disabled or approval-required. (`CONSERVATIVE_RELAY_DEFAULTS` in `src/types/conversation.ts`)
 
-**Gate:** ten representative prompts retain existing ask/poll/stop behavior; recovery/replay creates no duplicate send. — live smoke PASSED 2026-08-07 (ask→poll→completed, real answer extracted); full ten-prompt + replay-safety gate pending (replay safety = event-store runtime, P1 Half 2)
+**Gate:** ten representative prompts retain existing ask/poll/stop behavior; recovery/replay creates no duplicate send. — live smoke PASSED 2026-08-07 (ask→poll→completed, real answer extracted); full ten-prompt + replay-safety gate pending (replay safety = event-store runtime, P1 Half 2). **Perplexity critique (2026-08-07):** the replay-safety criterion cannot pass without the event-store runtime, so the P1 gate is only partially met — treat event store as a P3 dependency, not just P4's (see P3).
 
 ### P2 — First heterogeneous adapter: Grok
 
@@ -279,14 +279,16 @@ For each provider:
 
 **Outcome:** independent provider sessions operating concurrently.
 
+- [ ] **Audit the P2 dispatcher's tab-addressing assumption first** (Perplexity critique 2026-08-07): `provider_ask/poll/stop` shipped before the registry and likely encode a one-tab-per-provider singleton (driver `open()` uses `cometClient.connect()`). The registry changes addressing from providerKey → tabId; confirm drivers resolve per-tab before building the pool.
 - [ ] Implement `Map<tabId, TabSession>` registry.
 - [ ] Implement CDP session pool keyed by tab.
+- [ ] Add per-tab poll backoff + circuit breaker (P0 spike measured evaluate/insert load, NOT sustained five-tab streaming extraction — Perplexity critique).
 - [ ] Replace global close-all/new-chat behavior with scoped tab reset.
 - [ ] Implement last-tab protection per provider.
 - [ ] Add `provider_open`, `provider_list`, `provider_close`, `provider_health`, and `provider_override`.
 - [ ] Persist overrides.
 - [ ] Add `lastKnownMessageId`, extraction cursor/version, content hash, and `lastCompletedAt`.
-- [ ] Implement reconnect logic that does not produce duplicate response events.
+- [ ] Implement reconnect logic that does not produce duplicate response events. — **depends on the P1 event-store runtime** (durable extraction cursor; Perplexity critique: reconnect-dedup gate is impossible without it, making the deferred event store a P3 prerequisite, not just P4's).
 
 **Gate:** Perplexity and Grok can be opened, asked, polled, reset, and closed independently; closing or degrading one does not affect the other.
 
@@ -296,11 +298,13 @@ For each provider:
 
 - [ ] Implement `relay_prepare` to select the source event and build an envelope.
 - [ ] Enforce relay policy before transmission: approval, attribution, length, markdown treatment, timeout, and provider enablement.
+- [ ] **Bind approval to a hash of the exact envelope — single-use, expiring** (Perplexity critique 2026-08-07: otherwise content can mutate between approval and send).
 - [ ] Implement wrapped relay with an explicit provenance header.
 - [ ] Implement local summarization handoff as a client-controlled action, not an implicit claim that the server is Claude.
-- [ ] Implement `relay_send` and record a receipt for every attempt.
+- [ ] Implement `relay_send` and record a receipt for every attempt (append-only receipt stream, not mutable records — Perplexity critique).
 - [ ] Add content-size and structure limits before provider input.
-- [ ] Add conversation-log persistence and redaction configuration.
+- [ ] Add conversation-log persistence and **redaction / no-content logging as first-class config** (Grok + Perplexity critiques — before P4 ships, not an afterthought).
+- [ ] **Specify unknown-delivery reconciliation**: read-only re-extraction matching content hash / providerMessageId at the destination before any client-approved resend (Perplexity critique).
 - [ ] Test blocked, timed-out, and uncertain deliveries without automatic resend.
 
 **Gate:** a selected Perplexity or Grok answer can be relayed to the other only after approval, with a complete event trail and safe failure behavior.
@@ -309,7 +313,10 @@ For each provider:
 
 **Outcome:** clients can coordinate long-running tasks without noisy polling or runaway loops.
 
-- [ ] Implement `wait_any(tabIds, timeoutMs)`.
+**P5a (in the minimal release):**
+- [ ] Implement `wait_any(tabIds, timeoutMs)`. (Perplexity critique 2026-08-07: the ship boundary needs `wait_any` but not plan machinery — ship P5a first, defer `run_plan`/`step_plan`)
+
+**P5b (deferred):**
 - [ ] Implement `run_plan` and `step_plan`.
 - [ ] Require each plan to declare maximum turns, wall-clock deadline, content/relay-byte limit, and failure policy.
 - [ ] Support cancellation and resumable halted plans.
@@ -321,6 +328,8 @@ For each provider:
 ### P6 — Expand adapter coverage
 
 **Outcome:** Gemini, ChatGPT, and Claude.ai join through the same adapter process.
+
+**Re-scoped (both critiques, 2026-08-07):** discovery for all five providers already shipped as a CLI/MCP tool, so P6 shrinks to driver implementation + per-provider typing/markdown quirks + login-expiry simulation. Do NOT re-run the full discovery workflow.
 
 - [x] Repeat discovery, fixture, health, and `PONG` validation for each provider. (all 5 providers live-verified 2026-08-06/07 — ACK/PONG/ALPHA/OK/BRAVO validations, HIGH-confidence entries in `src/providers/entries/*.json`, discovery shipped as CLI + MCP tools, PR #10)
 - [ ] Add provider-specific markdown and typing settings.
@@ -348,12 +357,34 @@ For each provider:
 **Outcome:** the backbone is maintainable over time.
 
 - [ ] Append structured health observations to `health-log.jsonl`.
-- [ ] Surface hook failure rate, last degraded time, and last successful verification.
+- [ ] Surface hook failure rate, last degraded time, and last successful verification. (Grok critique 2026-08-07: surface "last successful high-confidence verification" in provider_health early — the confidence data already exists, ADR 0003)
 - [x] Document selector maintenance, concurrency ceiling, retention, relay exposure, login expiry, UI automation risks, and deprecation timeline. (runbook `docs/runbooks/grok-provider-discovery.md` + ADRs 0001-0003 + `docs/p0-cdp-concurrency-findings.md`)
 - [ ] Add regression fixtures whenever a provider UI changes. (fixtures exist per provider in `test/fixtures/`; the regenerate-on-drift workflow is `comet-mcp discover --provider X` — PR #10/ADR 0003)
 - [ ] Establish a release checklist requiring provider health and relay-policy review.
 
 **Gate:** the system can explain why a provider is unavailable, which selector path was used, whether a relay was delivered, and what action is safe next. — partially met: `provider_verify` explains missing hooks + resolution path (ADR 0003); relay-delivery explanation pending P4
+
+## Provider critique integration (2026-08-07)
+
+Both Perplexity and Grok critiqued this plan against the current implementation (full texts in
+`docs/reference/06-provider-critiques/`). Integrated decisions:
+
+**Sequencing:**
+- **Event store before full P3** — both critiques: it is a P3 dependency (reconnect-dedup gate needs a durable extraction cursor), not just P4's. Do a *minimal* store first (append-only JSONL, idempotency index, durable cursor checkpoints) — Perplexity: "days not weeks."
+- **P5 split**: ship `wait_any` (P5a) in the minimal release; defer `run_plan`/`step_plan` (P5b).
+- **P6 re-scoped**: driver wiring + per-provider quirks only; discovery is done.
+- **P3 audit first**: the P2 dispatcher likely encodes one-tab-per-provider singleton (`open()` uses `cometClient.connect()`); audit tab-addressing before the registry.
+
+**Type contracts (Perplexity):**
+- Add `schemaVersion` to envelopes, receipts, events (ProviderEntry has it; fabric types don't).
+- Separate `idempotencyKey` (reused on retry) from `id` (fresh per attempt); receipts carry attempt numbers.
+- Put extraction evidence (contentHash, providerMessageId, cursor) on the `DeliveryReceipt`; treat receipts as append-only.
+- Taint propagation: events derived from provider output inherit `trusted: false` (keep the literal-false tripwire).
+- Expired `budget.deadlineAt` after restart → envelope transitions to `blocked`, never `sent`.
+
+**P4 (both):** approval binds to a hash of the exact envelope (single-use, expiring); redaction/no-content logging is first-class config; unknown-delivery reconciliation = read-only re-extraction matching contentHash/providerMessageId before any client-approved resend; operational posture "fail the individual provider, never the fabric."
+
+**P3 (Perplexity):** add per-tab poll backoff + circuit breaker (P0 spike measured evaluate/insert load, not sustained streaming extraction).
 
 ## Test matrix
 
