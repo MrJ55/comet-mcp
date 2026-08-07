@@ -13,6 +13,8 @@ import type { ProviderId } from '../types/conversation.js';
 import { writeFileSync, mkdirSync, readFileSync, unlinkSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { packageRoot } from '../core/registry.js';
+import { sessionPool } from '../cdp-pool.js';
+import { tabRegistry } from '../tab-registry.js';
 import { perplexityDriver } from './perplexity.js';
 import { grokDriver } from './grok.js';
 
@@ -26,9 +28,79 @@ export function getDriver(provider: string): ChatDriver | null {
   return DRIVERS[provider] ?? null;
 }
 
+/** Open (or reuse) a provider tab via the registry; returns the registered TabSession. */
+export async function openTab(provider: string, opts: { newTab?: boolean } = {}): Promise<TabSession> {
+  const driver = getDriver(provider);
+  if (!driver) throw new Error(`Unknown provider: ${provider} (have: ${listDrivers().join(', ')})`);
+  return tabRegistry.open(driver.provider, opts);
+}
+
 /** List registered provider names. */
 export function listDrivers(): string[] {
   return Object.keys(DRIVERS);
+}
+
+// ---------------------------------------------------------------------------
+// P3: per-tab poll backoff + circuit breaker
+// (Perplexity critique: P0 spike measured evaluate/insert load, NOT sustained
+// five-tab streaming extraction — the pool needs per-tab throttling.)
+// ---------------------------------------------------------------------------
+
+const POLL_BASE_MS = 2000;
+const POLL_MAX_MS = 15000;
+const CIRCUIT_TRIP_THRESHOLD = 5;   // consecutive poll failures before the breaker opens
+const CIRCUIT_COOLDOWN_MS = 30000;  // half-open retry after cooldown
+
+interface TabCircuit {
+  failures: number;
+  openUntil: number; // epoch ms; 0 = closed
+  lastPollAt: number;
+}
+
+const circuits = new Map<string, TabCircuit>();
+
+/** Backoff for the next poll on a tab (2s base, doubles, caps at 15s). */
+export function pollDelayFor(targetId: string, prevDelayMs = 0): number {
+  const c = circuits.get(targetId) ?? { failures: 0, openUntil: 0, lastPollAt: 0 };
+  return Math.min(POLL_BASE_MS * Math.pow(2, c.failures), POLL_MAX_MS);
+}
+
+/** Record a successful poll — reset the breaker's failure counter and close the circuit. */
+export function recordPollSuccess(targetId: string): void {
+  const c = circuits.get(targetId) ?? { failures: 0, openUntil: 0, lastPollAt: 0 };
+  c.failures = 0;
+  c.openUntil = 0; // success closes an open circuit (half-open retry passed)
+  c.lastPollAt = Date.now();
+  circuits.set(targetId, c);
+}
+
+/**
+ * Record a poll failure. Returns the remaining cooldown when the circuit is open
+ * (caller should skip the poll), else 0.
+ */
+export function recordPollFailure(targetId: string): number {
+  const c = circuits.get(targetId) ?? { failures: 0, openUntil: 0, lastPollAt: 0 };
+  c.failures++;
+  if (c.failures >= CIRCUIT_TRIP_THRESHOLD) {
+    c.openUntil = Date.now() + CIRCUIT_COOLDOWN_MS;
+  }
+  c.lastPollAt = Date.now();
+  circuits.set(targetId, c);
+  return Math.max(0, c.openUntil - Date.now());
+}
+
+/** True when the tab's circuit is open (skip polling, surface degraded state). */
+export function isCircuitOpen(targetId: string): boolean {
+  const c = circuits.get(targetId);
+  return !!c && c.openUntil > Date.now();
+}
+
+/** Update a TabSession's dedup anchors (P3; reconnect-dedup gate builds on these). */
+export function updateSessionAnchors(session: TabSession, poll: PollResult): void {
+  if (poll.messageId) session.lastKnownMessageId = poll.messageId;
+  if (poll.contentHash) session.lastContentHash = poll.contentHash;
+  if (poll.cursor) session.extractionCursor = poll.cursor;
+  if (poll.state === 'completed') session.lastCompletedAt = new Date().toISOString();
 }
 
 /** A normalized ask outcome — the shared response shape for provider_ask/comet_ask. */
@@ -195,14 +267,29 @@ export function renderPoll(poll: PollResult, provider = 'provider'): string {
 /**
  * Generic ask-and-wait: send the prompt, poll until completed (or timeout), return the
  * outcome. Provider-neutral — the driver's open() handles tab targeting/navigation.
+ *
+ * P3: the session opened here is kept across ask+poll (the registry holds it; drivers
+ * route CDP ops through the per-tab pool handle, so no per-poll reconnect). The poll
+ * loop applies per-tab backoff + circuit breaking.
  */
 export async function askAndWait(driver: ChatDriver, prompt: string, timeoutMs: number): Promise<AskOutcome> {
   const session: TabSession = await driver.open();
+  return askAndWaitOn(driver, session, prompt, timeoutMs);
+}
+
+/**
+ * P3 variant: ask-and-wait against an EXISTING registered session (tab-addressed).
+ * The caller (MCP handler) resolves the tabId; this keeps the session open across
+ * ask+poll with no reconnect, and applies per-tab backoff + circuit breaking.
+ */
+export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prompt: string, timeoutMs: number): Promise<AskOutcome> {
+  const targetId = session.targetId;
 
   // Snapshot the conversation state BEFORE sending so we can detect the NEW
   // response reliably (a follow-up in an existing thread already has prior text
   // in the DOM — "any text exists" is not "this turn completed").
   const before = await driver.poll(session);
+  updateSessionAnchors(session, before);
   const beforeHash = before.contentHash ?? simpleHash(before.response);
   const beforeLen = before.response.length;
 
@@ -213,10 +300,52 @@ export async function askAndWait(driver: ChatDriver, prompt: string, timeoutMs: 
   let sawNewResponse = false;
   let last: PollResult | null = null;
   let prevHash: string | null = null; // for stability check: two identical readings = done
+  let delay = POLL_BASE_MS;
 
   while (Date.now() - startTime < timeoutMs) {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    last = await driver.poll(session);
+    if (isCircuitOpen(targetId)) {
+      // breaker open — surface degraded instead of hammering a failing tab
+      last = await driver.poll(session).catch(() => null);
+      if (last) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        continue;
+      }
+      return {
+        completed: false,
+        response: '',
+        markdown: null,
+        steps: stepsCollected,
+        currentStep: '',
+        status: 'degraded',
+        agentBrowsingUrl: '',
+        timedOut: true,
+      };
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    let poll: PollResult;
+    try {
+      poll = await driver.poll(session);
+      recordPollSuccess(targetId);
+      updateSessionAnchors(session, poll);
+      delay = pollDelayFor(targetId);
+    } catch {
+      const cooldown = recordPollFailure(targetId);
+      if (cooldown > 0) {
+        return {
+          completed: false,
+          response: '',
+          markdown: null,
+          steps: stepsCollected,
+          currentStep: '',
+          status: 'degraded',
+          agentBrowsingUrl: '',
+          timedOut: true,
+        };
+      }
+      continue; // transient failure — backoff, retry
+    }
+    last = poll;
     for (const step of last.steps) {
       if (!stepsCollected.includes(step)) stepsCollected.push(step);
     }

@@ -12,7 +12,9 @@
  * (migration path from comet_* to provider_*, P1 item).
  */
 
-import { cometClient } from '../cdp-client.js';
+import { tabRegistry } from '../tab-registry.js';
+import { sessionPool } from '../cdp-pool.js';
+import type { TabCDPHandle } from '../cdp-pool.js';
 import type { EvaluateResult } from '../types.js';
 import type {
   ChatDriver, PollResult, TabSession, HealthReport, ProviderState,
@@ -36,10 +38,17 @@ const COMPOSER_FALLBACKS = [
 
 const entry = () => loadEntry('perplexity');
 
-/** Wrap cometClient.evaluate's EvaluateResult into a bare value (or null). */
-async function evalValue(expression: string): Promise<any> {
+/** Resolve the per-tab CDP handle for a session (throws if the tab is not pooled). */
+function handleFor(session: TabSession): TabCDPHandle {
+  const handle = sessionPool.get(session.targetId);
+  if (!handle) throw new Error(`no pooled CDP session for tab ${session.targetId} — reopen with provider_open`);
+  return handle;
+}
+
+/** Wrap a pool handle's EvaluateResult into a bare value (or null). */
+async function evalValue(handle: TabCDPHandle, expression: string): Promise<any> {
   try {
-    const r: EvaluateResult = await cometClient.evaluate(expression);
+    const r: EvaluateResult = await handle.evaluate(expression);
     return r?.result?.value ?? null;
   } catch {
     return null;
@@ -47,7 +56,7 @@ async function evalValue(expression: string): Promise<any> {
 }
 
 /** Resolve a control selector via registry confidence + fingerprint rebind. */
-async function resolveControl(name: 'composer' | 'sendButton' | 'modelPicker' | 'responseContainer', conditional = false): Promise<string | null> {
+async function resolveControl(handle: TabCDPHandle, name: 'composer' | 'sendButton' | 'modelPicker' | 'responseContainer', conditional = false): Promise<string | null> {
   const e = entry();
   if (!e) return null;
   const { selector, control } = resolveWithConfidence(e, name);
@@ -55,7 +64,7 @@ async function resolveControl(name: 'composer' | 'sendButton' | 'modelPicker' | 
 
   // fingerprint rebind on miss (ADR 0003)
   const resolved = await resolveWithRebind(
-    (expr) => evalValue(expr),
+    (expr) => evalValue(handle, expr),
     selector,
     control?.fingerprint,
   );
@@ -81,19 +90,19 @@ async function resolveControl(name: 'composer' | 'sendButton' | 'modelPicker' | 
 }
 
 /** Find a usable composer: entry selector first (with rebind), then fallback chain. */
-async function findComposer(): Promise<string | null> {
-  const entrySel = await resolveControl('composer');
+async function findComposer(handle: TabCDPHandle): Promise<string | null> {
+  const entrySel = await resolveControl(handle, 'composer');
   if (entrySel) return entrySel;
   for (const sel of COMPOSER_FALLBACKS) {
-    const hit = await evalValue(`document.querySelector(${JSON.stringify(sel)}) !== null`);
+    const hit = await evalValue(handle, `document.querySelector(${JSON.stringify(sel)}) !== null`);
     if (hit === true) return sel;
   }
   return null;
 }
 
 /** Find the send button (conditional — only after text exists). */
-async function findSendButton(): Promise<string | null> {
-  return resolveControl('sendButton', true);
+async function findSendButton(handle: TabCDPHandle): Promise<string | null> {
+  return resolveControl(handle, 'sendButton', true);
 }
 
 // ---------------------------------------------------------------------------
@@ -135,22 +144,13 @@ export class PerplexityDriver implements ChatDriver {
   readonly provider = 'perplexity' as const;
 
   async open(): Promise<TabSession> {
-    // Reuse CometCDPClient.connect to ensure a live session on a perplexity tab.
-    await cometClient.connect();
-    const tabs = await cometClient.listTabsCategorized();
-    const targetId = tabs.main?.id ?? undefined;
-    return {
-      provider: 'perplexity',
-      tabId: targetId ?? 'unknown',
-      targetId: targetId ?? '',
-      cdpSessionId: 'comet-client',
-      openedAt: new Date().toISOString(),
-      state: 'connected',
-    };
+    // P3: open/reuse the provider tab through the registry (pooled per-tab session).
+    return tabRegistry.open('perplexity');
   }
 
   async ask(session: TabSession, prompt: string): Promise<{ receipt: DeliveryReceipt }> {
-    const composer = await findComposer();
+    const handle = handleFor(session);
+    const composer = await findComposer(handle);
     if (!composer) {
       return {
         receipt: {
@@ -162,7 +162,7 @@ export class PerplexityDriver implements ChatDriver {
     }
 
     // type (contenteditable first, textarea fallback) — same as CometAI.sendPrompt
-    const typed = await evalValue(`(() => {
+    const typed = await evalValue(handle, `(() => {
       const el = document.querySelector(${JSON.stringify(composer)});
       if (!el) return { success: false };
       if (el.isContentEditable || el.tagName === 'DIV') {
@@ -190,7 +190,7 @@ export class PerplexityDriver implements ChatDriver {
       };
     }
 
-    const submitted = await this.submit(composer);
+    const submitted = await this.submit(handle, composer);
     return {
       receipt: {
         receiptId: crypto.randomUUID(), envelopeId: 'local', correlationId: crypto.randomUUID(),
@@ -203,11 +203,11 @@ export class PerplexityDriver implements ChatDriver {
   }
 
   /** Submit the current prompt — same strategy ladder as CometAI.submitPrompt. */
-  private async submit(composer: string): Promise<boolean> {
+  private async submit(handle: TabCDPHandle, composer: string): Promise<boolean> {
     await new Promise((r) => setTimeout(r, 500));
 
     // verify text landed
-    const hasContent = await evalValue(`(() => {
+    const hasContent = await evalValue(handle, `(() => {
       const el = document.querySelector(${JSON.stringify(composer)});
       if (!el) return false;
       const v = el.isContentEditable || el.tagName === 'DIV'
@@ -217,12 +217,12 @@ export class PerplexityDriver implements ChatDriver {
     if (hasContent !== true) return false;
 
     // Strategy 1: Enter key (most reliable for Perplexity)
-    await evalValue(`(() => { const el = document.querySelector(${JSON.stringify(composer)}); if (el) el.focus(); return true; })()`);
-    await cometClient.pressKey('Enter');
+    await evalValue(handle, `(() => { const el = document.querySelector(${JSON.stringify(composer)}); if (el) el.focus(); return true; })()`);
+    await handle.pressKey('Enter');
     await new Promise((r) => setTimeout(r, 500));
 
     // check submitted (composer emptied or loading)
-    const submitted = await evalValue(`(() => {
+    const submitted = await evalValue(handle, `(() => {
       const el = document.querySelector(${JSON.stringify(composer)});
       if (el) {
         const v = el.isContentEditable || el.tagName === 'DIV' ? el.innerText : (el.value || '');
@@ -233,9 +233,9 @@ export class PerplexityDriver implements ChatDriver {
     if (submitted === true) return true;
 
     // Strategy 2: click submit button (from entry, with rebind)
-    const sendSel = await findSendButton();
+    const sendSel = await findSendButton(handle);
     if (sendSel) {
-      const clicked = await evalValue(`(() => {
+      const clicked = await evalValue(handle, `(() => {
         const b = document.querySelector(${JSON.stringify(sendSel)});
         if (!b || b.disabled) return false;
         b.click(); return true;
@@ -247,19 +247,22 @@ export class PerplexityDriver implements ChatDriver {
     }
 
     // Last resort: Enter one more time
-    await cometClient.pressKey('Enter');
+    await handle.pressKey('Enter');
     return true;
   }
 
   async poll(session: TabSession): Promise<PollResult> {
-    // agent browsing URL (unchanged from CometAI.getAgentStatus)
+    const handle = handleFor(session);
+
+    // agent browsing URL (unchanged from CometAI.getAgentStatus) — browser-level list, stateless
     let agentBrowsingUrl = '';
     try {
+      const { cometClient } = await import('../cdp-client.js');
       const tabs = await cometClient.listTabsCategorized();
       if (tabs.agentBrowsing) agentBrowsingUrl = tabs.agentBrowsing.url;
     } catch { /* continue without URL */ }
 
-    const raw = await cometClient.safeEvaluate(POLL_SCRIPT);
+    const raw = await handle.safeEvaluate(POLL_SCRIPT);
     const value = (raw?.result?.value ?? {}) as {
       hasActiveStopButton?: boolean;
       hasLoadingSpinner?: boolean;
@@ -301,7 +304,8 @@ export class PerplexityDriver implements ChatDriver {
   }
 
   async stop(session: TabSession): Promise<boolean> {
-    const result = await cometClient.evaluate(`(() => {
+    const handle = handleFor(session);
+    const result = await handle.evaluate(`(() => {
       for (const btn of document.querySelectorAll('button[aria-label*="Stop"], button[aria-label*="Cancel"]')) {
         btn.click(); return true;
       }
@@ -314,12 +318,12 @@ export class PerplexityDriver implements ChatDriver {
   }
 
   async reset(session: TabSession): Promise<void> {
-    // same as CometAI/old comet_ask newChat path: navigate to Perplexity home
-    await cometClient.navigate('https://www.perplexity.ai/', true);
-    await new Promise((r) => setTimeout(r, 1500));
+    // P3: scoped reset — only this provider's tab is navigated (tabRegistry.reset)
+    await tabRegistry.reset(session.targetId);
   }
 
   async health(session: TabSession): Promise<HealthReport> {
+    const handle = handleFor(session);
     const e = entry();
     const checks: HealthReport['hookResolution'] = [];
     let healthy = true;
@@ -327,7 +331,7 @@ export class PerplexityDriver implements ChatDriver {
       const control = e?.controls[name];
       if (!control?.selector) continue;
       const resolved = await resolveWithRebind(
-        (expr) => evalValue(expr),
+        (expr) => evalValue(handle, expr),
         control.selector,
         control.fingerprint,
       );

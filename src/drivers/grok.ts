@@ -17,7 +17,9 @@
  * rebind, same as the Perplexity driver.
  */
 
-import { cometClient } from '../cdp-client.js';
+import { tabRegistry } from '../tab-registry.js';
+import { sessionPool } from '../cdp-pool.js';
+import type { TabCDPHandle } from '../cdp-pool.js';
 import type { EvaluateResult } from '../types.js';
 import type {
   ChatDriver, PollResult, TabSession, HealthReport, ProviderState,
@@ -30,10 +32,17 @@ import { htmlToMarkdown } from '../providers/markdown.js';
 
 const entry = () => loadEntry('grok');
 
-/** Wrap cometClient.evaluate's EvaluateResult into a bare value (or null). */
-async function evalValue(expression: string): Promise<any> {
+/** Resolve the per-tab CDP handle for a session (throws if the tab is not pooled). */
+function handleFor(session: TabSession): TabCDPHandle {
+  const handle = sessionPool.get(session.targetId);
+  if (!handle) throw new Error(`no pooled CDP session for tab ${session.targetId} — reopen with provider_open`);
+  return handle;
+}
+
+/** Wrap a pool handle's EvaluateResult into a bare value (or null). */
+async function evalValue(handle: TabCDPHandle, expression: string): Promise<any> {
   try {
-    const r: EvaluateResult = await cometClient.evaluate(expression);
+    const r: EvaluateResult = await handle.evaluate(expression);
     return r?.result?.value ?? null;
   } catch {
     return null;
@@ -41,14 +50,14 @@ async function evalValue(expression: string): Promise<any> {
 }
 
 /** Resolve a control selector via registry confidence + fingerprint rebind. */
-async function resolveControl(name: 'composer' | 'sendButton' | 'modelPicker' | 'newChat' | 'responseContainer', conditional = false): Promise<string | null> {
+async function resolveControl(handle: TabCDPHandle, name: 'composer' | 'sendButton' | 'modelPicker' | 'newChat' | 'responseContainer', conditional = false): Promise<string | null> {
   const e = entry();
   if (!e) return null;
   const { selector, control } = resolveWithConfidence(e, name);
   if (!selector) return null;
 
   const resolved = await resolveWithRebind(
-    (expr) => evalValue(expr),
+    (expr) => evalValue(handle, expr),
     selector,
     control?.fingerprint,
   );
@@ -73,16 +82,16 @@ async function resolveControl(name: 'composer' | 'sendButton' | 'modelPicker' | 
 }
 
 /** Find the Grok composer (entry selector first, role=textbox fallback). */
-async function findComposer(): Promise<string | null> {
-  const entrySel = await resolveControl('composer');
+async function findComposer(handle: TabCDPHandle): Promise<string | null> {
+  const entrySel = await resolveControl(handle, 'composer');
   if (entrySel) return entrySel;
-  const hit = await evalValue(`document.querySelector('[role="textbox"]') !== null`);
+  const hit = await evalValue(handle, `document.querySelector('[role="textbox"]') !== null`);
   return hit === true ? '[role="textbox"]' : null;
 }
 
 /** Find the send button (conditional — only after text exists). */
-async function findSendButton(): Promise<string | null> {
-  return resolveControl('sendButton', true);
+async function findSendButton(handle: TabCDPHandle): Promise<string | null> {
+  return resolveControl(handle, 'sendButton', true);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,22 +111,13 @@ export class GrokDriver implements ChatDriver {
   readonly provider = 'grok' as const;
 
   async open(): Promise<TabSession> {
-    // Connect to the grok.com tab specifically (not the auto-selected "best" tab).
-    const targets = await cometClient.listTargets();
-    const grokTab = targets.find((t) => t.type === 'page' && /grok\.com/.test(t.url));
-    if (grokTab) await cometClient.connect(grokTab.id);
-    return {
-      provider: 'grok',
-      tabId: grokTab?.id ?? 'unknown',
-      targetId: grokTab?.id ?? '',
-      cdpSessionId: 'comet-client',
-      openedAt: new Date().toISOString(),
-      state: 'connected',
-    };
+    // P3: open/reuse the provider tab through the registry (pooled per-tab session).
+    return tabRegistry.open('grok');
   }
 
   async ask(session: TabSession, prompt: string): Promise<{ receipt: DeliveryReceipt }> {
-    const composer = await findComposer();
+    const handle = handleFor(session);
+    const composer = await findComposer(handle);
     if (!composer) {
       return {
         receipt: {
@@ -129,7 +129,7 @@ export class GrokDriver implements ChatDriver {
     }
 
     // type into the contenteditable composer (focus editable child, execCommand)
-    const typed = await evalValue(`(() => {
+    const typed = await evalValue(handle, `(() => {
       const el = document.querySelector(${JSON.stringify(composer)});
       if (!el) return { success: false };
       const editable = el.matches('[contenteditable]') ? el : (el.querySelector('[contenteditable]') || el);
@@ -151,9 +151,9 @@ export class GrokDriver implements ChatDriver {
     // submit — send button (conditional) or Enter fallback
     await new Promise((r) => setTimeout(r, 500));
     let submitted = false;
-    const sendSel = await findSendButton();
+    const sendSel = await findSendButton(handle);
     if (sendSel) {
-      const clicked = await evalValue(`(() => {
+      const clicked = await evalValue(handle, `(() => {
         const b = document.querySelector(${JSON.stringify(sendSel)});
         if (!b || b.disabled) return false;
         b.click(); return true;
@@ -161,8 +161,8 @@ export class GrokDriver implements ChatDriver {
       submitted = clicked === true;
     }
     if (!submitted) {
-      await evalValue(`(() => { const el = document.querySelector(${JSON.stringify(composer)}); if (el) el.focus(); return true; })()`);
-      await cometClient.pressKey('Enter');
+      await evalValue(handle, `(() => { const el = document.querySelector(${JSON.stringify(composer)}); if (el) el.focus(); return true; })()`);
+      await handle.pressKey('Enter');
       submitted = true;
     }
 
@@ -178,7 +178,8 @@ export class GrokDriver implements ChatDriver {
   }
 
   async poll(session: TabSession): Promise<PollResult> {
-    const raw = await cometClient.safeEvaluate(POLL_SCRIPT);
+    const handle = handleFor(session);
+    const raw = await handle.safeEvaluate(POLL_SCRIPT);
     const value = (raw?.result?.value ?? {}) as {
       bodyText?: string;
       assistantMessages?: string[];
@@ -221,10 +222,12 @@ export class GrokDriver implements ChatDriver {
   }
 
   async reset(session: TabSession): Promise<void> {
-    // new chat via the entry control, fallback to navigate
-    const newChatSel = await resolveControl('newChat', true);
+    // P3: scoped reset via the registry — only this provider's tab is touched.
+    // newChat entry control first, fallback to entry-URL navigation.
+    const handle = handleFor(session);
+    const newChatSel = await resolveControl(handle, 'newChat', true);
     if (newChatSel) {
-      const clicked = await evalValue(`(() => {
+      const clicked = await evalValue(handle, `(() => {
         const b = document.querySelector(${JSON.stringify(newChatSel)});
         if (!b) return false; b.click(); return true;
       })()`);
@@ -233,11 +236,11 @@ export class GrokDriver implements ChatDriver {
         return;
       }
     }
-    await cometClient.navigate('https://grok.com/', true);
-    await new Promise((r) => setTimeout(r, 1500));
+    await tabRegistry.reset(session.targetId);
   }
 
   async health(session: TabSession): Promise<HealthReport> {
+    const handle = handleFor(session);
     const e = entry();
     const checks: HealthReport['hookResolution'] = [];
     let healthy = true;
@@ -245,7 +248,7 @@ export class GrokDriver implements ChatDriver {
       const control = e?.controls[name];
       if (!control?.selector) continue;
       const resolved = await resolveWithRebind(
-        (expr) => evalValue(expr),
+        (expr) => evalValue(handle, expr),
         control.selector,
         control.fingerprint,
       );

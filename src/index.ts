@@ -22,7 +22,10 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { cometClient } from "./cdp-client.js";
-import { getDriver, listDrivers, normalizePrompt, askAndWait, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention } from "./drivers/index.js";
+import { tabRegistry } from "./tab-registry.js";
+import { sessionPool } from "./cdp-pool.js";
+import { getDriver, listDrivers, openTab, normalizePrompt, askAndWait, askAndWaitOn, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention, recordPollSuccess } from "./drivers/index.js";
+import { loadEntry, writeEntry } from "./core/registry.js";
 
 // Retention sweep on startup (expired responses cleaned before serving).
 enforceRetention();
@@ -100,6 +103,61 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "provider_open",
+    description: "Open (or reuse) a provider's tab and register it in the tab registry. Returns the tabId that other provider_* tools address. P3 tab addressing: providerKey → tabId.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", description: "Provider name: perplexity, grok" },
+        newTab: { type: "boolean", description: "Force a fresh tab instead of reusing the existing provider tab (default: false)" },
+      },
+      required: ["provider"],
+    },
+  },
+  {
+    name: "provider_list",
+    description: "List registered provider tabs and their CDP session state (tabId, provider, openedAt, state, dedup anchors).",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "provider_close",
+    description: "Close a provider tab (scoped — never touches sibling provider tabs). Last-tab protection: the LAST tab of a provider is reset instead of closed.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", description: "Provider name: perplexity, grok" },
+        tabId: { type: "string", description: "Specific tabId to close (optional — defaults to the provider's registered tab)" },
+        force: { type: "boolean", description: "Close even the last tab of a provider (default: false — last tab is reset instead)" },
+      },
+    },
+  },
+  {
+    name: "provider_health",
+    description: "Structured health for a provider tab: per-control hook resolution source + login/degraded state. Sends NO prompt.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", description: "Provider name: perplexity, grok" },
+        tabId: { type: "string", description: "Specific tabId (optional — defaults to the provider's registered tab)" },
+      },
+      required: ["provider"],
+    },
+  },
+  {
+    name: "provider_override",
+    description: "Persist a selector override for a provider control (ADR 0003: overrides outrank known selectors). Next discovery run diffs against it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", description: "Provider name: perplexity, grok" },
+        control: { type: "string", description: "Control name: composer, sendButton, modelPicker, newChat, responseContainer, ..." },
+        selector: { type: "string", description: "CSS selector to force" },
+        clear: { type: "boolean", description: "Clear the override for this control (default: false)" },
+      },
+      required: ["provider"],
+    },
+  },
+  {
     name: "provider_ask",
     description: "Send a prompt to any provider (perplexity, grok, ...) and wait for the complete response. Provider-neutral: dispatches to the registered ChatDriver. Returns text + markdown.",
     inputSchema: {
@@ -108,6 +166,7 @@ const TOOLS: Tool[] = [
         provider: { type: "string", description: "Provider name: perplexity, grok" },
         prompt: { type: "string", description: "Question or task for the provider" },
         timeout: { type: "number", description: "Max wait time in ms (default: 15000)" },
+        tabId: { type: "string", description: "Specific tabId to ask in (optional — defaults to the provider's registered tab)" },
       },
       required: ["provider", "prompt"],
     },
@@ -119,6 +178,7 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         provider: { type: "string", description: "Provider name: perplexity, grok" },
+        tabId: { type: "string", description: "Specific tabId (optional — defaults to the provider's registered tab)" },
       },
       required: ["provider"],
     },
@@ -130,6 +190,7 @@ const TOOLS: Tool[] = [
       type: "object",
       properties: {
         provider: { type: "string", description: "Provider name: perplexity, grok" },
+        tabId: { type: "string", description: "Specific tabId (optional — defaults to the provider's registered tab)" },
       },
       required: ["provider"],
     },
@@ -164,37 +225,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "comet_connect": {
         // Auto-start Comet with debug port (will restart if running without it)
         const startResult = await cometClient.startComet(9222);
-
-        // Get all tabs and clean up - close all except one
+        // P3 (audit F5): do NOT close all tabs / navigate to Perplexity here — that
+        // destroys sibling provider tabs (ADR 0001 §Safeguards 2). Scoped open/close
+        // lives in provider_open/provider_close. Report what's open instead.
         const targets = await cometClient.listTargets();
         const pageTabs = targets.filter(t => t.type === 'page');
-
-        // Close extra tabs, keep only one
-        if (pageTabs.length > 1) {
-          for (let i = 1; i < pageTabs.length; i++) {
-            try {
-              await cometClient.closeTab(pageTabs[i].id);
-            } catch { /* ignore */ }
-          }
-        }
-
-        // Get fresh tab list
-        const freshTargets = await cometClient.listTargets();
-        const anyPage = freshTargets.find(t => t.type === 'page');
-
-        if (anyPage) {
-          await cometClient.connect(anyPage.id);
-          // Always navigate to Perplexity home for clean state
-          await cometClient.navigate("https://www.perplexity.ai/", true);
-          await new Promise(resolve => setTimeout(resolve, 1500));
-          return { content: [{ type: "text", text: `${startResult}\nConnected to Perplexity (cleaned ${pageTabs.length - 1} old tabs)` }] };
-        }
-
-        // No tabs at all - create a new one
-        const newTab = await cometClient.newTab("https://www.perplexity.ai/");
-        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for page load
-        await cometClient.connect(newTab.id);
-        return { content: [{ type: "text", text: `${startResult}\nCreated new tab and navigated to Perplexity` }] };
+        return {
+          content: [{ type: "text", text: `${startResult}\nComet ready. ${pageTabs.length} page tab(s) open. Use provider_open to open/register a provider tab (providerKey → tabId).` }],
+        };
       }
 
       case "comet_ask": {
@@ -205,7 +243,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         prompt = normalizePrompt(prompt);
         // comet_* = Perplexity alias over the generic ask-and-wait (P1 migration path)
-        const outcome = await askAndWait(getDriver('perplexity')!, prompt, timeout);
+        const driver = getDriver('perplexity')!;
+        const session = await openTab('perplexity', { newTab: args?.newChat === true });
+        if (args?.newChat === true) await driver.reset(session);
+        const outcome = await askAndWait(driver, prompt, timeout);
         if (outcome.completed) {
           return { content: [{ type: "text", text: compactAskResult('perplexity', outcome) }] };
         }
@@ -214,14 +255,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "comet_poll": {
         const driver = getDriver('perplexity')!;
-        const session = await driver.open();
+        const session = await openTab('perplexity');
         const poll = await driver.poll(session);
+        recordPollSuccess(session.targetId);
         return { content: [{ type: "text", text: renderPoll(poll, 'perplexity') }] };
       }
 
       case "comet_stop": {
         const driver = getDriver('perplexity')!;
-        const session = await driver.open();
+        const session = await openTab('perplexity');
         const stopped = await driver.stop(session);
         return {
           content: [{
@@ -238,10 +280,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let prompt = args?.prompt as string;
         const timeout = (args?.timeout as number) || 15000;
         if (!prompt || prompt.trim().length === 0) {
-          return { content: [{ type: "text", text: "Error: prompt cannot be empty" }], isError: true };
+          return { content: [{ type: "text", text: "Error: prompt cannot be empty" }] };
         }
         prompt = normalizePrompt(prompt);
-        const outcome = await askAndWait(driver, prompt, timeout);
+        // P3: address the session explicitly — reuse the registered tab unless a
+        // specific tabId was requested.
+        const tabId = String(args?.tabId ?? '');
+        if (tabId) {
+          const session = tabRegistry.get(tabId);
+          if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} — use provider_open first` }], isError: true };
+          const outcome = await askAndWaitOn(driver, session, prompt, timeout);
+          if (outcome.completed) {
+            return { content: [{ type: "text", text: compactAskResult(provider, outcome) }] };
+          }
+          return { content: [{ type: "text", text: renderInProgress(outcome) }] };
+        }
+        const session = await openTab(provider);
+        const outcome = await askAndWaitOn(driver, session, prompt, timeout);
         if (outcome.completed) {
           return { content: [{ type: "text", text: compactAskResult(provider, outcome) }] };
         }
@@ -252,8 +307,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const provider = String(args?.provider ?? '');
         const driver = getDriver(provider);
         if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
-        const session = await driver.open();
+        const tabId = String(args?.tabId ?? '');
+        const session = tabId ? tabRegistry.get(tabId) : await openTab(provider);
+        if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} — use provider_open first` }], isError: true };
         const poll = await driver.poll(session);
+        recordPollSuccess(session.targetId);
         return { content: [{ type: "text", text: renderPoll(poll, provider) }] };
       }
 
@@ -261,7 +319,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const provider = String(args?.provider ?? '');
         const driver = getDriver(provider);
         if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
-        const session = await driver.open();
+        const tabId = String(args?.tabId ?? '');
+        const session = tabId ? tabRegistry.get(tabId) : await openTab(provider);
+        if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} — use provider_open first` }], isError: true };
         const stopped = await driver.stop(session);
         return {
           content: [{
@@ -272,6 +332,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "comet_screenshot": {
+        // P3: screenshot the registered Perplexity tab via its pooled session;
+        // fall back to the global client only if no tab is registered.
+        const session = tabRegistry.getProviderTab('perplexity');
+        if (session && sessionPool.get(session.targetId)) {
+          const handle = sessionPool.get(session.targetId)!;
+          const result = await handle.screenshot("png");
+          return {
+            content: [{ type: "image", data: result.data, mimeType: "image/png" }],
+          };
+        }
         const result = await cometClient.screenshot("png");
         return {
           content: [{ type: "image", data: result.data, mimeType: "image/png" }],
@@ -280,10 +350,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "comet_mode": {
         const mode = args?.mode as string | undefined;
+        // P3: comet_mode is Perplexity-specific — address the registered Perplexity
+        // tab via its pooled session, falling back to the global client.
+        const session = tabRegistry.getProviderTab('perplexity');
+        const handle = session ? sessionPool.get(session.targetId) : null;
+        const evalExpr = async (expression: string) =>
+          handle ? handle.evaluate(expression) : cometClient.evaluate(expression);
+        const navigatePplx = async () => {
+          if (handle) await handle.navigate("https://www.perplexity.ai/", true);
+          else await cometClient.navigate("https://www.perplexity.ai/", true);
+        };
 
         // If no mode provided, show current mode
         if (!mode) {
-          const result = await cometClient.evaluate(`
+          const result = await evalExpr(`
             (() => {
               // Try button group first (wide screen)
               const modes = ['Search', 'Research', 'Labs', 'Learn'];
@@ -341,11 +421,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Navigate to Perplexity first if not there
         const state = cometClient.currentState;
         if (!state.currentUrl?.includes("perplexity.ai")) {
-          await cometClient.navigate("https://www.perplexity.ai/", true);
+          await navigatePplx();
         }
 
         // Try both UI patterns: button group (wide) and dropdown (narrow)
-        const result = await cometClient.evaluate(`
+        const result = await evalExpr(`
           (() => {
             // Strategy 1: Direct button (wide screen)
             const btn = document.querySelector('button[aria-label="${ariaLabel}"]');
@@ -376,7 +456,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (clickResult.success && clickResult.needsSelect) {
           // Wait for dropdown to open, then select the mode
           await new Promise(resolve => setTimeout(resolve, 300));
-          const selectResult = await cometClient.evaluate(`
+          const selectResult = await evalExpr(`
             (() => {
               // Look for dropdown menu items
               const items = document.querySelectorAll('[role="menuitem"], [role="option"], button');
@@ -405,6 +485,76 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+      }
+
+      case "provider_open": {
+        const provider = String(args?.provider ?? '');
+        const driver = getDriver(provider);
+        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        try {
+          const session = await openTab(provider, { newTab: args?.newTab === true });
+          return { content: [{ type: "text", text: `provider_open ${provider}: tabId=${session.tabId} state=${session.state} session=${session.cdpSessionId.slice(0, 40)}…` }] };
+        } catch (error) {
+          return { content: [{ type: "text", text: `provider_open failed: ${error instanceof Error ? error.message : error}` }], isError: true };
+        }
+      }
+
+      case "provider_list": {
+        const sessions = tabRegistry.list();
+        if (sessions.length === 0) return { content: [{ type: "text", text: "no provider tabs registered — use provider_open" }] };
+        const lines = sessions.map((s) =>
+          `  ${s.provider.padEnd(10)} tabId=${s.tabId}  ${s.state}  opened=${s.openedAt}` +
+          (s.lastCompletedAt ? `  lastCompleted=${s.lastCompletedAt}` : '') +
+          (s.lastContentHash ? `  hash=${s.lastContentHash.slice(0, 8)}` : '')
+        );
+        return { content: [{ type: "text", text: `${sessions.length} provider tab(s), pool ${sessionPool.size}/${sessionPool.cap}:\n${lines.join('\n')}` }] };
+      }
+
+      case "provider_close": {
+        const provider = String(args?.provider ?? '');
+        const driver = getDriver(provider);
+        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        const tabId = String(args?.tabId ?? '');
+        const session = tabId ? tabRegistry.get(tabId) : tabRegistry.getProviderTab(driver.provider);
+        if (!session) return { content: [{ type: "text", text: `no registered tab for ${provider} — use provider_open first` }], isError: true };
+        const { closed, reset } = await tabRegistry.close(session.targetId, { force: args?.force === true });
+        if (reset) return { content: [{ type: "text", text: `${provider}: last-tab protection — tab reset instead of closed (sibling provider tabs untouched)` }] };
+        return { content: [{ type: "text", text: closed ? `${provider} tab closed (tabId=${session.targetId})` : `${provider} tab ${session.targetId} not closed (not pooled?)` }] };
+      }
+
+      case "provider_health": {
+        const provider = String(args?.provider ?? '');
+        const driver = getDriver(provider);
+        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        const tabId = String(args?.tabId ?? '');
+        const session = tabId ? tabRegistry.get(tabId) : tabRegistry.getProviderTab(driver.provider);
+        if (!session) return { content: [{ type: "text", text: `no registered tab for ${provider} — use provider_open first` }], isError: true };
+        const health = await driver.health(session);
+        let text = `${provider} health (tabId=${session.targetId}): ${health.healthy ? 'HEALTHY' : 'DEGRADED'}${health.loginRequired ? ' LOGIN_REQUIRED' : ''}\n`;
+        for (const c of health.hookResolution) text += `  [${c.source}] ${c.control}\n`;
+        if (health.note) text += `  note: ${health.note}\n`;
+        return { content: [{ type: "text", text }] };
+      }
+
+      case "provider_override": {
+        const provider = String(args?.provider ?? '');
+        const control = String(args?.control ?? '');
+        const selector = String(args?.selector ?? '');
+        const clear = args?.clear === true;
+        const driver = getDriver(provider);
+        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        if (!control) return { content: [{ type: "text", text: 'Error: control required (composer, sendButton, modelPicker, newChat, responseContainer, ...)' }], isError: true };
+        if (!clear && !selector) return { content: [{ type: "text", text: 'Error: selector required (or pass clear=true)' }], isError: true };
+        const entry = loadEntry(provider as any);
+        if (!entry) return { content: [{ type: "text", text: `no entry for ${provider} — run provider_discover first` }], isError: true };
+        const controls = (entry.controls ?? {}) as Record<string, any>;
+        if (clear) {
+          delete controls[control];
+        } else {
+          controls[control] = { ...(controls[control] ?? {}), selector, confidence: 1, last_validated: Math.floor(Date.now() / 1000) };
+        }
+        writeEntry(entry);
+        return { content: [{ type: "text", text: `provider_override: ${provider}.${control} ${clear ? 'cleared' : `set to "${selector}"`} (persisted)` }] };
       }
 
       case "provider_discover": {

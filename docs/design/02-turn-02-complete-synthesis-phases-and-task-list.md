@@ -279,15 +279,15 @@ For each provider:
 
 **Outcome:** independent provider sessions operating concurrently.
 
-- [ ] **Audit the P2 dispatcher's tab-addressing assumption first** (Perplexity critique 2026-08-07): `provider_ask/poll/stop` shipped before the registry and likely encode a one-tab-per-provider singleton (driver `open()` uses `cometClient.connect()`). The registry changes addressing from providerKey → tabId; confirm drivers resolve per-tab before building the pool.
-- [ ] Implement `Map<tabId, TabSession>` registry.
-- [ ] Implement CDP session pool keyed by tab.
-- [ ] Add per-tab poll backoff + circuit breaker (P0 spike measured evaluate/insert load, NOT sustained five-tab streaming extraction — Perplexity critique).
-- [ ] Replace global close-all/new-chat behavior with scoped tab reset.
-- [ ] Implement last-tab protection per provider.
-- [ ] Add `provider_open`, `provider_list`, `provider_close`, `provider_health`, and `provider_override`.
-- [ ] Persist overrides.
-- [ ] Add `lastKnownMessageId`, extraction cursor/version, content hash, and `lastCompletedAt`.
+- [x] **Audit the P2 dispatcher's tab-addressing assumption first** (Perplexity critique 2026-08-07): `provider_ask/poll/stop` shipped before the registry and likely encode a one-tab-per-provider singleton (driver `open()` uses `cometClient.connect()`). The registry changes addressing from providerKey → tabId; confirm drivers resolve per-tab before building the pool.
+- [x] Implement `Map<tabId, TabSession>` registry. (`src/tab-registry.ts`, P3 2026-08-07)
+- [x] Implement CDP session pool keyed by tab. (`src/cdp-pool.ts`, per-target WebSocket, cap=5)
+- [x] Add per-tab poll backoff + circuit breaker (P0 spike measured evaluate/insert load, NOT sustained five-tab streaming extraction — Perplexity critique).
+- [x] Replace global close-all/new-chat behavior with scoped tab reset. (comet_connect no longer destroys tabs; provider_close/reset scoped)
+- [x] Implement last-tab protection per provider. (last tab reset instead of closed)
+- [x] Add `provider_open`, `provider_list`, `provider_close`, `provider_health`, and `provider_override`.
+- [x] Persist overrides. (provider_override writes entries via registry writeEntry)
+- [x] Add `lastKnownMessageId`, extraction cursor/version, content hash, and `lastCompletedAt`. (updateSessionAnchors on poll; fields populate)
 - [ ] Implement reconnect logic that does not produce duplicate response events. — **depends on the P1 event-store runtime** (durable extraction cursor; Perplexity critique: reconnect-dedup gate is impossible without it, making the deferred event store a P3 prerequisite, not just P4's).
 
 **Gate:** Perplexity and Grok can be opened, asked, polled, reset, and closed independently; closing or degrading one does not affect the other.
