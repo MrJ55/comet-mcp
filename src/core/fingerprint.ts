@@ -57,7 +57,19 @@ export function rebindSearchJs(prevFingerprint: number, candidateSelector: strin
       const kids=el.children&&el.children.length?Array.from(el.children).slice(0,3).map(c=>c.tagName.toLowerCase()).join(','):'';
       const cust=(el.type||'')+','+(el.name||'')+','+(el.getAttribute('data-testid')||'');
       const fp=__fnv(__nc(el)+','+el.tagName.toLowerCase()+','+kids+'|'+cust);
-      if(fp===want) return el;
+      if(fp===want){
+        // Return a SERIALIZABLE summary (Runtime.evaluate runs with returnByValue:true
+        // — a DOM node cannot cross the boundary). selectorFromElement() rebuilds a
+        // best-effort CSS selector from these attrs.
+        return {
+          id: el.id || null,
+          testid: el.getAttribute('data-testid') || null,
+          aria: el.getAttribute('aria-label') || null,
+          name: el.getAttribute('name') || null,
+          tag: el.tagName ? el.tagName.toLowerCase() : null,
+          cls: (typeof el.className === 'string' ? el.className : '') || null,
+        };
+      }
     }
     return null;
   })()`;
@@ -79,26 +91,21 @@ export interface RebindResult {
 }
 
 /**
- * Build a best-effort CSS selector for a matched element, from its attributes —
- * mirrors registry.ts bestSelector but for a live matched element (we only have its
- * identity attributes, not the discovery inventory shape).
+ * Build a best-effort CSS selector for a matched element, from the SERIALIZABLE
+ * summary returned by rebindSearchJs (id/testid/aria/name/tag/cls).
  */
-export function selectorFromElement(el: any): string | null {
-  if (!el) return null;
+export function selectorFromElement(summary: any): string | null {
+  if (!summary) return null;
   const esc = (s: string) => String(s).replace(/[^a-zA-Z0-9_-]/g, ch => '\\' + ch);
-  if (el.id) return `#${esc(el.id)}`;
-  const tid = el.getAttribute && el.getAttribute('data-testid');
-  if (tid) return `[data-testid="${esc(tid)}"]`;
-  const aria = el.getAttribute && el.getAttribute('aria-label');
-  if (aria) return `[aria-label="${esc(aria)}"]`;
-  const name = el.getAttribute && el.getAttribute('name');
-  if (name) return `[name="${esc(name)}"]`;
-  const tag = el.tagName ? el.tagName.toLowerCase() : 'div';
-  if (el.className && typeof el.className === 'string') {
-    const cls = el.className.split(/\s+/).filter((c: string) => c && !/^[a-f0-9]{6,}$/.test(c)).slice(0, 2);
-    if (cls.length) return `${tag}.${cls.map(esc).join('.')}`;
+  if (summary.id) return `#${esc(summary.id)}`;
+  if (summary.testid) return `[data-testid="${esc(summary.testid)}"]`;
+  if (summary.aria) return `[aria-label="${esc(summary.aria)}"]`;
+  if (summary.name) return `[name="${esc(summary.name)}"]`;
+  if (summary.cls) {
+    const cls = summary.cls.split(/\s+/).filter((c: string) => c && !/^[a-f0-9]{6,}$/.test(c)).slice(0, 2);
+    if (cls.length) return `${summary.tag || 'div'}.${cls.map(esc).join('.')}`;
   }
-  return `${tag}[data-testid="${esc(tag)}"]`; // fallback — likely no match, caller falls back
+  return null;
 }
 
 /**

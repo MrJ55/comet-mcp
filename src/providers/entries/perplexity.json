@@ -18,10 +18,12 @@
         "sm:max-h-[25vh]"
       ],
       "snippet": "",
-      "confidence": 0.8000000000000002,
-      "success_count": 4,
-      "last_validated": 1786104132,
-      "fingerprint": 736211465
+      "confidence": 1,
+      "success_count": 2,
+      "last_validated": 1786105169,
+      "fingerprint": 736211465,
+      "fail_count": 0,
+      "last_sig": "#ask-input-v2"
     },
     "sendButton": {
       "selector": "[aria-label=\"Submit\"]",
@@ -52,17 +54,17 @@
       "text": "Model",
       "hasIcon": true,
       "disabled": false,
-      "confidence": 0.8000000000000002,
-      "success_count": 4,
-      "last_validated": 1786104132,
+      "confidence": 1,
+      "success_count": 10,
+      "last_validated": 1786105169,
       "fingerprint": 3180050133
     },
     "responseContainer": {
       "selector": "[class*=\"prose\"]",
       "condition": "take the LAST element for the current turn",
-      "confidence": 0.8000000000000002,
-      "success_count": 4,
-      "last_validated": 1786104132,
+      "confidence": 1,
+      "success_count": 10,
+      "last_validated": 1786105169,
       "fingerprint": 1388161146
     }
   },
