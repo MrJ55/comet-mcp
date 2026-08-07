@@ -6,9 +6,10 @@
  * contracts, so official API transports can join later without rewriting routing,
  * policy, persistence, or scheduling.
  *
- * Discovery data (P2, grok.com verified 2026-08-06) informs these types directly —
- * notably that Grok's Fast model NEVER renders a stop button and that its send button is
- * conditional on typed text.
+ * Discovery data (P2, verified live 2026-08-06/07 across Perplexity, Grok, Gemini,
+ * ChatGPT, Claude) informs these types directly — notably that Grok's Fast model NEVER
+ * renders a stop button, that several send buttons are conditional on typed text, and
+ * that provider entries are DATA (JSON), loaded via src/core/registry.ts, not code.
  */
 
 import type { ProviderId } from './conversation.js';
@@ -86,6 +87,58 @@ export interface HealthReport {
   }[];
   lastCheckedAt: string;
   note?: string;
+}
+
+/**
+ * A CSS selector that resolves a control, with aliases and render preconditions.
+ * Produced by live discovery (src/core/discovery.ts); consumed by drivers via
+ * src/core/registry.ts (known selector → heuristic → persisted override).
+ */
+export interface ProviderControl {
+  selector: string;
+  aliases?: string[];
+  /** True when the control only exists after a precondition (e.g. text typed). */
+  conditional?: boolean;
+  condition?: string;
+}
+
+/** Control names a provider entry can carry (provider-specific subsets). */
+export type ProviderControlName =
+  | 'composer'
+  | 'sendButton'
+  | 'modelPicker'
+  | 'newChat'
+  | 'userMessage'
+  | 'assistantMessage'
+  | 'workingIndicator'
+  | 'responseContainer';
+
+/**
+ * A provider registry entry: known selectors + constrained heuristics + capability
+ * evidence + discovery metadata. Stored as JSON in src/providers/entries/ and loaded
+ * by src/core/registry.ts — discovery writes it directly, so regeneration is
+ * repeatable and git-diffable when a provider changes its DOM.
+ */
+export interface ProviderEntry {
+  provider: ProviderId;
+  url: string;
+  /** Browser version at discovery time — selector drift sentinel. */
+  version: string;
+  discoveredAt: string;
+  method: string;
+  confidence: 'high' | 'medium' | 'low';
+  /** Controls discovered for this provider (not all providers have all controls). */
+  controls: Partial<Record<ProviderControlName, ProviderControl>>;
+  /** Selector list the discovery probe used to find response containers. */
+  responseSelectors?: string[];
+  heuristics: {
+    composerFallback: string;
+    sendButtonFallback: string;
+    responseFallback: string;
+    stopDetection: string;
+    /** Only the states this provider can express. */
+    stateMachine: Partial<Record<ProviderState, string>>;
+  };
 }
 
 /**
