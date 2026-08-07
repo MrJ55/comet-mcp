@@ -40,6 +40,7 @@ export async function runCli(argv: string[]): Promise<number> {
       console.log(`  prompt: "${result.validationPrompt}" (expect "${result.expectedToken}")`);
       console.log(`  submit: ${result.submitMethod?.method ?? '?'}${result.submitMethod?.selector ? ' via ' + result.submitMethod.selector : ''}`);
       console.log(`  entry ${result.wroteEntry ? `written: ${result.entryPath}` : '(not written)'}`);
+      if (result.guarded?.existingBetter) console.log(`  ⚠ NOT overwritten (downgrade guard): ${result.guarded.reason}`);
       const fixtures = Object.keys(result.fixtures);
       if (fixtures.length) console.log(`  fixtures: ${fixtures.join(', ')}`);
       if (diff) {
