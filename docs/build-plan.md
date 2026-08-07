@@ -19,12 +19,12 @@ MCP client -> control plane -> conversation fabric -> provider adapters -> Comet
 | Phase | Deliverable | Completion gate | Status |
 | --- | --- | --- | --- |
 | P0 | Architecture decision record and CDP concurrency spike | Measured safe concurrent-tab ceiling | ✅ DONE (ADR 0001, findings doc, cap=5) |
-| P1 | Conversation fabric and Perplexity contract refactor | Existing behavior preserved; replay-safe deliveries | ?? types + Perplexity driver + event-store runtime DONE (ADR 0002, src/drivers/perplexity.ts, src/core/event-store.ts, replay-safety smoke PASSED 2026-08-07); full ten-prompt gate pending |
+| P1 | Conversation fabric and Perplexity contract refactor | Existing behavior preserved; replay-safe deliveries | ✅ DONE — types + Perplexity driver + event-store runtime (ADR 0002, `src/types/conversation.ts`, `src/drivers/perplexity.ts`, `src/core/event-store.ts` — append-only JSONL + idempotency index + durable cursors + receipt stream, 357f7ea); replay-safety proven live (p1-replay-smoke: same idempotencyKey → prior outcome, no dup send) |
 | P2 | Grok adapter and discovery pipeline | Ask/poll/stop/health PONG validation passes | ✅ DONE — Perplexity + Grok drivers live-validated (ADR 0004: markdown via turndown, provider dispatcher + `provider_ask/poll/stop` MCP tools, `comet_*` aliases); 28 tests; verified in pi |
-| P3 | Concurrent tab registry and CDP session pool | Perplexity and Grok operate independently | ✅ DONE — audit + registry/pool + tools + reconnect-dedup (2026-08-07, bfe1a24 + 868f87f); live gates PASSED: independent operation + reconnect-dedup (unchanged content → no new response event) |
-| P4 | Approval-required relay with provenance and receipts | Safe relay succeeds or fails explicitly | ⬜ not started |
-| P5 | `wait_any` and bounded scheduler | Plans halt/resume without duplicate sends | ⬜ not started |
-| P6 | Gemini, ChatGPT, and Claude.ai adapters | Each has structured degradation handling | 🟡 discovery done; adapter impls pending |
+| P3 | Concurrent tab registry and CDP session pool | Perplexity and Grok operate independently | ✅ DONE — audit + registry/pool + 6 provider tools + reconnect-dedup (2026-08-07: bfe1a24, 5333aea, 8a90456, f8a98c7); live gates PASSED: pool 5/5 real tabs, independent operation, reconnect-dedup (unchanged content → no new response event), cap-leak fixed |
+| P4 | Approval-required relay with provenance and receipts | Safe relay succeeds or fails explicitly | ⬜ not started — substrate ready (receipt stream + idempotency in event store) |
+| P5 | `wait_any` and bounded scheduler | Plans halt/resume without duplicate sends | ⬜ not started (P5a wait_any is the ship-boundary demo) |
+| P6 | Gemini, ChatGPT, and Claude.ai adapters | Each has structured degradation handling | 🟡 discovery done for all 5 (entries HIGH; claude discovery now completes via button-click submit, 774e875); driver impls pending — only perplexity+grok askable |
 | P7 | Optional fanout, critique, routing, and debate | All features obey budgets and relay policy | ⬜ not started |
 | P8 | Observability and operational hardening | Drift, failures, and delivery state are diagnosable | 🟡 drift tooling exists (provider_verify/ADRs 0002-0003); hardening pending |
 
@@ -48,6 +48,42 @@ Resolution order: known → fingerprint-rebind → heuristic → discovery escal
 Markdown extraction (innerHTML + turndown in Node) works across all providers.
 Legacy `src/comet-ai.ts` retired. Verified live in pi: `provider_ask {provider: grok}`
 returns text + markdown; `provider_verify` HEALTHY for perplexity and grok.
+
+## Tab registry + CDP session pool is live (P3, 2026-08-07)
+
+Providers are isolated per-tab: `src/cdp-pool.ts` (one CDP session per target,
+cap=5 measured, `TabCapExceededError`, per-tab health/reconnect) and
+`src/tab-registry.ts` (`Map<tabId, TabSession>`, providerKey→tabId addressing,
+last-tab protection, scoped reset, most-recent-completed default selection,
+reconnect-dedup re-hydration). MCP tools: `provider_open / provider_reconnect /
+provider_list / provider_close / provider_health / provider_override`, plus
+`provider_ask/poll/stop` accept `tabId`. `comet_connect` no longer destroys
+tabs. Live-verified through pi: pool 5/5 with real provider tabs.
+
+## Async ask dispatch (2026-08-07, c206970)
+
+Long provider asks survive the pi gateway RPC window: `provider_ask` dispatches
+fire-and-forget and returns `{status:"in_progress", correlationId,
+idempotencyKey}` immediately; `provider_poll` advances the ask server-side
+(8s completion-stability window, per-tab backoff, dedup, delivery receipt);
+`provider_response` fetches the stored full response in chunks. Fixes the
+previous -32001 gateway timeout that stranded prompts mid-submit.
+
+## Discovery is hardened (2026-08-07)
+
+- Ephemeral framework IDs (`base-ui-_r_*`, `radix-*`) never become selectors or
+  rebind targets (isEphemeralId).
+- Fingerprints are seeded at discovery time for every control (rebind anchor
+  exists from day one — fixes the broken-selector/never-acquires-anchor deadlock).
+- Visible-composer ranking (a hidden 0x0 a11y textarea no longer wins over the
+  real contenteditable).
+- Conditional controls (sendButton, responseContainer) detected by observation
+  and flagged so verify skips idle absence.
+- Downgrade guard: a low-confidence/partial run cannot overwrite a strictly
+  better existing entry (sendButton loss, fewer controls, lower confidence, or
+  dropped conditional flags → write refused).
+- Claude discovery now completes (send button is `button[aria-label="Send
+  message"]`, appears after typing, click submits) — all 5 entries HIGH.
 
 
 ## Initial source layout
