@@ -20,7 +20,7 @@ MCP client -> control plane -> conversation fabric -> provider adapters -> Comet
 | --- | --- | --- | --- |
 | P0 | Architecture decision record and CDP concurrency spike | Measured safe concurrent-tab ceiling | ✅ DONE (ADR 0001, findings doc, cap=5) |
 | P1 | Conversation fabric and Perplexity contract refactor | Existing behavior preserved; replay-safe deliveries | 🟡 types + Perplexity driver refactor done (ADR 0002/0003, `src/drivers/perplexity.ts`, extraction unit-tested, live smoke passed); event-store runtime (Half 2) pending |
-| P2 | Grok adapter and discovery pipeline | Ask/poll/stop/health PONG validation passes | 🟡 discovery DONE for all 5; Perplexity + Grok drivers DONE (live gate passed, markdown strategy landed, 28 tests); Gemini/ChatGPT/Claude adapters pending (P6) |
+| P2 | Grok adapter and discovery pipeline | Ask/poll/stop/health PONG validation passes | ✅ DONE — Perplexity + Grok drivers live-validated (ADR 0004: markdown via turndown, provider dispatcher + `provider_ask/poll/stop` MCP tools, `comet_*` aliases); 28 tests; verified in pi |
 | P3 | Concurrent tab registry and CDP session pool | Perplexity and Grok operate independently | ⬜ not started |
 | P4 | Approval-required relay with provenance and receipts | Safe relay succeeds or fails explicitly | ⬜ not started |
 | P5 | `wait_any` and bounded scheduler | Plans halt/resume without duplicate sends | ⬜ not started |
@@ -39,6 +39,15 @@ written directly by discovery — DOM-drift repair is `discover → commit new J
 Self-healing provider controls (ADR 0003): confidence-scored selectors (verify is a
 learning loop) + structural fingerprint rebind (re-renders survive without discovery).
 Resolution order: known → fingerprint-rebind → heuristic → discovery escalation.
+
+## Multi-provider runtime is wired (2026-08-07)
+
+`src/drivers/index.ts` is a driver registry + provider-neutral helpers (ADR 0004):
+`provider_ask` / `provider_poll` / `provider_stop` MCP tools dispatch via `getDriver`;
+`comet_ask` / `comet_poll` / `comet_stop` are Perplexity aliases over the same code.
+Markdown extraction (innerHTML + turndown in Node) works across all providers.
+Legacy `src/comet-ai.ts` retired. Verified live in pi: `provider_ask {provider: grok}`
+returns text + markdown; `provider_verify` HEALTHY for perplexity and grok.
 
 
 ## Initial source layout

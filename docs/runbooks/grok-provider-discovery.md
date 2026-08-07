@@ -85,6 +85,28 @@ Key findings baked into the entries:
   not `font-claude-message`.
 - **ChatGPT**: insertText read-back can race React; the send button's presence confirms text.
 
+## Runtime usage (MCP tools, ADR 0004)
+
+The drivers (`src/drivers/`) are usable directly from MCP clients. `comet_*` tools are
+Perplexity aliases; `provider_*` tools take a `provider` param and dispatch via the
+registry (`src/drivers/index.ts`):
+
+```text
+provider_ask    {provider, prompt, timeout?}  # ask + wait, returns text + markdown
+provider_poll   {provider}                     # status + text + markdown
+provider_stop   {provider}                     # stop (Grok Fast: no-op)
+provider_verify {provider}                     # cheap selector health, no prompt
+provider_discover {provider}                   # full discovery + entry regeneration
+```
+
+- **Markdown extraction**: drivers capture the response container's innerHTML and
+  convert via `src/providers/markdown.ts` (turndown) — works across all providers.
+  `PollResult.markdown` carries it; the flattened-text `response` stays primary.
+- `comet_ask`/`comet_poll`/`comet_stop` behave exactly as before (Perplexity) but run
+  over the shared dispatcher — the P1 `comet_*` → `provider_*` migration path.
+- Verified live through pi's MCP bridge: `provider_ask {provider: grok}` returned
+  text + markdown; `provider_verify` HEALTHY for perplexity and grok (2026-08-07).
+
 ## Drift response details
 
 If `provider_verify` reports a missing hook:

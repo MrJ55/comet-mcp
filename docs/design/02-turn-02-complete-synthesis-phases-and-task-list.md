@@ -273,7 +273,7 @@ For each provider:
 - [x] Add fixture-driven tests and live `PONG` validation. (live validations done for all 5 providers; 28 unit tests incl. fixture-driven `test/unit/fixture-driven.test.ts` against real captured DOM)
 - [x] Record operation confidence and capability evidence. (HIGH-confidence entries for all 5 providers; `src/providers/entries/*.json`)
 
-**Note (2026-08-07):** the discovery workflow was generalized and run against **all five** providers — Perplexity, Grok, Gemini, ChatGPT, Claude — producing HIGH-confidence entries (ACk/ALPHA/OK/BRAVO/PONG validations). Discovery is now a shipped tool (CLI `comet-mcp discover|verify|list` + MCP tools, PR #10, ADR 0002). Perplexity and Grok drivers are implemented and live-validated; Gemini/ChatGPT/Claude adapters remain (P6).
+**Note (2026-08-07):** the discovery workflow was generalized and run against **all five** providers — Perplexity, Grok, Gemini, ChatGPT, Claude — producing HIGH-confidence entries (ACk/ALPHA/OK/BRAVO/PONG validations). Discovery is now a shipped tool (CLI `comet-mcp discover|verify|list` + MCP tools, PR #10, ADR 0002). Perplexity and Grok drivers are implemented and live-validated (ADR 0004: markdown + provider dispatcher; `provider_ask/poll/stop` MCP tools; `comet_*` aliases); Gemini/ChatGPT/Claude adapters remain (P6). **P2 gate PASSED** — Grok ask/poll/stop/extraction/reset/health validated live with documented heuristic hooks (no-stop-button finding, timing-line extraction).
 
 ### P3 — Multi-tab control plane
 
