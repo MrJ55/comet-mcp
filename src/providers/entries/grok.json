@@ -72,8 +72,19 @@
       "success_count": 0,
       "fail_count": 0,
       "fingerprint": 0
+    },
+    "responseContainer": {
+      "selector": "[data-testid=\"assistant-message\"]",
+      "condition": "take the LAST element for the current turn",
+      "confidence": 0.9,
+      "success_count": 0,
+      "fail_count": 0,
+      "fingerprint": 0
     }
   },
+  "responseSelectors": [
+    "[data-testid=\"assistant-message\"]"
+  ],
   "heuristics": {
     "composerFallback": "any [role=\"textbox\"] or textarea visible near the bottom of the viewport",
     "sendButtonFallback": "[data-testid=\"chat-submit\"] (rendered only after text is typed); Enter-key fallback works",

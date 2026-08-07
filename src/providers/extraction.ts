@@ -45,14 +45,14 @@ export interface ProseText {
 }
 
 /**
- * Filter raw prose texts the same way the in-page script did:
- * skip nav/aside/header/footer/form context (caller drops those elements),
- * skip UI-prefixed text, skip short questions, keep len > 5.
+ * Filter raw prose texts: skip nav/aside/header/footer/form context (caller drops
+ * those elements), skip UI-prefixed text, skip short questions, keep len > 5.
+ * `uiPrefixes` is provider-specific (Perplexity defaults; Grok passes its own).
  */
-export function filterProseTexts(texts: string[]): string[] {
+export function filterProseTexts(texts: string[], uiPrefixes: readonly string[] = UI_PREFIXES): string[] {
   return texts.filter((raw) => {
     const text = raw.trim();
-    if (UI_PREFIXES.some((ui) => text.startsWith(ui))) return false;
+    if (uiPrefixes.some((ui) => text.startsWith(ui))) return false;
     if (text.endsWith('?') && text.length < 100) return false;
     return text.length > 5;
   });
@@ -73,13 +73,13 @@ export function dedupeByContainment(texts: string[]): string[] {
  * Clean the joined response: strip UI phrases, collapse horizontal whitespace
  * (NOT newlines — paragraph breaks must survive), collapse 3+ newlines to 2.
  */
-export function cleanResponse(response: string): string {
+export function cleanResponse(response: string, uiPhrases: RegExp = UI_PHRASES): string {
   // Order matches the verified in-page script exactly: strip UI phrases, trim,
   // collapse horizontal whitespace (NOT newlines), collapse 3+ newlines to 2, trim.
   // The leading .trim() before the collapses matters: without it, edge whitespace
   // like "\n\n  Line" collapses to "\n\n Line" (a leading space survives).
   return response
-    .replace(UI_PHRASES, '')
+    .replace(uiPhrases, '')
     .trim()
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
@@ -150,4 +150,55 @@ export function determineStatus(signals: {
   if (hasReviewedSources && !hasWorkingText && hasAskFollowUp) return 'completed';
   if (hasWorkingText) return 'working';
   return 'idle';
+}
+
+// ---------------------------------------------------------------------------
+// Grok-specific extraction (P2) — no stop button on the Fast model, so the
+// streaming/completion signal is the "Working for Xs" / "Worked for Xs" timing
+// line, which Grok renders INSIDE the assistant-message text. One answer = one
+// [data-testid="assistant-message"] element (no nesting-dedupe problem).
+// ---------------------------------------------------------------------------
+
+/** Grok's streaming indicator ("Working for 3s") flips to "Worked for 3s" on completion. */
+export const GROK_TIMING_LINE = /^(?:Work(?:ing|ed) for \d+s[\s\n]*)+/;
+
+/**
+ * Determine Grok status: "Working for Xs" → streaming; "Worked for Xs" (or
+ * working indicator gone with non-empty message) → completed; else idle.
+ */
+export function determineGrokStatus(signals: {
+  bodyText: string;
+  lastMessageLen: number;
+}): 'idle' | 'streaming' | 'completed' {
+  const { bodyText, lastMessageLen } = signals;
+  const hasWorking = /Working for \d+s/i.test(bodyText);
+  const hasWorked = /Worked for \d+s/i.test(bodyText);
+  if (hasWorking) return 'streaming';
+  if (hasWorked || lastMessageLen > 0) return 'completed';
+  return 'idle';
+}
+
+/**
+ * Extract Grok's response: take the LAST assistant-message text (current turn),
+ * strip the leading "Working for Xs"/"Worked for Xs" timing line, clean.
+ * Returns response + provenance flags.
+ */
+export function extractGrokResponse(assistantMessages: string[]): {
+  response: string;
+  joinedProseBlocks: boolean;
+  dedupedByContainment: boolean;
+  truncatedFromEnd: boolean;
+} {
+  const last = assistantMessages[assistantMessages.length - 1] ?? '';
+  // strip the timing line that Grok renders at the start of the message
+  let response = last.replace(GROK_TIMING_LINE, '');
+  if (response) response = cleanResponse(response);
+  const truncated = response.length > RESPONSE_CAP;
+  response = response.slice(-RESPONSE_CAP);
+  return {
+    response,
+    joinedProseBlocks: response.length > 0,
+    dedupedByContainment: assistantMessages.length > 1,
+    truncatedFromEnd: truncated,
+  };
 }
