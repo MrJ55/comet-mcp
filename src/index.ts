@@ -22,7 +22,7 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { cometClient } from "./cdp-client.js";
-import { cometAI } from "./comet-ai.js";
+import { legacySendPrompt, legacyGetAgentStatus, legacyStopAgent } from "./drivers/perplexity.js";
 
 const TOOLS: Tool[] = [
   {
@@ -215,7 +215,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const oldState = oldStateResult.result.value as { count: number; lastText: string };
 
         // Send the prompt
-        await cometAI.sendPrompt(prompt);
+        await legacySendPrompt(prompt);
 
         // Wait for completion
         const startTime = Date.now();
@@ -246,7 +246,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           }
 
-          const status = await cometAI.getAgentStatus();
+          const status = await legacyGetAgentStatus();
 
           // Collect steps
           for (const step of status.steps) {
@@ -262,7 +262,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Still working after initial wait - return "in progress" (non-blocking)
-        const finalStatus = await cometAI.getAgentStatus();
+        const finalStatus = await legacyGetAgentStatus();
         let inProgressMsg = `Task in progress (${stepsCollected.length} steps so far).\n`;
         inProgressMsg += `Status: ${finalStatus.status.toUpperCase()}\n`;
         if (finalStatus.currentStep) {
@@ -280,7 +280,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "comet_poll": {
-        const status = await cometAI.getAgentStatus();
+        const status = await legacyGetAgentStatus();
 
         // If completed, return the response directly (most useful case)
         if (status.status === 'completed' && status.response) {
@@ -310,7 +310,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "comet_stop": {
-        const stopped = await cometAI.stopAgent();
+        const stopped = await legacyStopAgent();
         return {
           content: [{
             type: "text",

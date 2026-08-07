@@ -254,8 +254,8 @@ For each provider:
 
 - [x] Implement `ConversationEnvelope`, event log, delivery receipts, correlation IDs, and idempotency keys. (types: `src/types/conversation.ts`, ADR 0002 — runtime store still to build)
 - [x] Define `ChatDriver`, `ProviderEntry`, `TabSession`, `HealthReport`, and `PollResult`. (types: `src/types/provider.ts`, entries: `src/providers/entries/*.json`, ADR 0002)
-- [ ] Refactor Perplexity behavior into the provider contract without changing user-visible behavior.
-- [ ] Preserve and test existing extraction fixes: ordering, truncation, whitespace, escaping, and steps parsing.
+- [x] Refactor Perplexity behavior into the provider contract without changing user-visible behavior. (`src/drivers/perplexity.ts`, extraction in `src/providers/extraction.ts`, server wired via compat layer; P1 gate smoke passed live 2026-08-07)
+- [x] Preserve and test existing extraction fixes: ordering, truncation, whitespace, escaping, and steps parsing. (9 unit tests in `test/unit/extraction.test.ts`, all passing; port is faithful to verified in-page behavior)
 - [x] Add synthetic fixtures for idle, typing, streaming, complete, login-required, and degraded states. (idle/typing/streaming/completed done for all 5 providers in `test/fixtures/<provider>/`; login-required/degraded pending)
 - [ ] Add a migration path from `comet_*` to `provider_*`.
 - [x] Implement conservative Perplexity defaults: relay disabled or approval-required. (`CONSERVATIVE_RELAY_DEFAULTS` in `src/types/conversation.ts`)
