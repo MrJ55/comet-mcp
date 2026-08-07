@@ -10,7 +10,7 @@
 
 import type { ChatDriver, PollResult, TabSession } from '../types/provider.js';
 import type { ProviderId } from '../types/conversation.js';
-import { writeFileSync, mkdirSync } from 'fs';
+import { writeFileSync, mkdirSync, readFileSync, unlinkSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { packageRoot } from '../core/registry.js';
 import { perplexityDriver } from './perplexity.js';
@@ -52,47 +52,135 @@ export function normalizePrompt(prompt: string): string {
     .trim();
 }
 
-/**
- * Persist a full provider response (text + markdown) to the outputs dir and return
- * a compact result that fits small MCP-gateway result budgets (~500 bytes). The full
- * content is always available at the returned path — the gateway cap does not limit
- * what the client can retrieve (2026-08-07 finding: pi's gateway truncates tool
- * results at a few hundred bytes, so long responses must be file-backed, not inline).
- */
-export function persistResponse(provider: string, poll: PollResult): { text: string; path: string; bytes: number } {
-  const dir = join(packageRoot(), 'responses');
+// ---------------------------------------------------------------------------
+// Response store (ADR: file-backed, ID-based, retention-aware)
+// ---------------------------------------------------------------------------
+// 2026-08-07 critique integration (Perplexity + Grok): the compact result must be
+// STRUCTURED (not a formatted string), retrieval should be ID-based chunked access
+// (not filesystem paths), and the store needs retention. This module writes the full
+// response (text + markdown) to responses/<id>.md, keeps an in-memory registry of
+// {id, provider, path, hash, fullChars, markdownChars, createdAt, expiresAt}, and
+// enforces a TTL + max-count retention.
+
+const RESPONSES_DIR = () => join(packageRoot(), 'responses');
+export const RESPONSE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const MAX_RESPONSES = 100;
+
+export interface ResponseRecord {
+  id: string;
+  provider: string;
+  path: string;
+  contentHash: string;
+  fullChars: number;
+  markdownChars: number;
+  createdAt: string;
+  expiresAt: string;
+}
+
+const registry = new Map<string, ResponseRecord>();
+
+/** FNV-1a content hash — same as the drivers use for PollResult.contentHash. */
+export function simpleHash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(16);
+}
+
+/** Clean up expired + over-count responses on startup and after each write. */
+export function enforceRetention(): number {
+  const now = Date.now();
+  let removed = 0;
+  for (const [id, rec] of registry) {
+    if (new Date(rec.expiresAt).getTime() < now) {
+      try { unlinkSync(rec.path); } catch { /* already gone */ }
+      registry.delete(id);
+      removed++;
+    }
+  }
+  // max-count: drop oldest
+  const sorted = [...registry.entries()].sort((a, b) => a[1].createdAt.localeCompare(b[1].createdAt));
+  while (sorted.length > MAX_RESPONSES) {
+    const [id, rec] = sorted.shift()!;
+    try { unlinkSync(rec.path); } catch { /* already gone */ }
+    registry.delete(id);
+    removed++;
+  }
+  return removed;
+}
+
+/** Persist a full response, return its ID + structured record. */
+export function storeResponse(provider: string, text: string, markdown: string | null): { id: string; rec: ResponseRecord } {
+  const dir = RESPONSES_DIR();
   mkdirSync(dir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const path = join(dir, `${provider}-${stamp}.md`);
-  const body = `# ${provider} response (${stamp})\n\n${poll.response}\n\n---\n\n## Markdown\n\n${poll.markdown ?? '(none)'}\n`;
+  enforceRetention();
+  const id = `${provider}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const path = join(dir, `${id}.md`);
+  const body = `# ${provider} response (${id})\n\n${text}\n\n---\n\n## Markdown\n\n${markdown ?? '(none)'}\n`;
+  const now = Date.now();
+  const rec: ResponseRecord = {
+    id, provider, path, contentHash: simpleHash(text),
+    fullChars: text.length, markdownChars: markdown?.length ?? 0,
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + RESPONSE_TTL_MS).toISOString(),
+  };
+  // atomic-ish write: write then register
   writeFileSync(path, body);
-  return { text: body, path, bytes: Buffer.byteLength(body, 'utf8') };
+  registry.set(id, rec);
+  return { id, rec };
 }
 
-/** Compact inline preview (fits the gateway budget) + path for the full content. */
-export function compactResult(poll: PollResult, path: string): string {
-  const preview = poll.response.slice(0, 200);
-  return `Status: ${poll.state}\nPreview: ${preview}${poll.response.length > 200 ? '…' : ''}\nFull (${poll.response.length} chars + markdown): ${path}`;
+/** Structured compact result (fits gateway budget). */
+export function structuredCompact(rec: ResponseRecord, preview: string, status: string): string {
+  return JSON.stringify({
+    status,
+    responseId: rec.id,
+    preview: preview.length > 200 ? preview.slice(0, 200) + '…' : preview,
+    previewChars: preview.length,
+    fullChars: rec.fullChars,
+    markdownChars: rec.markdownChars,
+    contentHash: rec.contentHash,
+    expiresAt: rec.expiresAt,
+  });
 }
 
-/** Persist a completed AskOutcome and return the compact tool-result string. */
+/** Persist a completed AskOutcome and return the structured compact tool-result string. */
 export function compactAskResult(provider: string, outcome: AskOutcome): string {
-  const dir = join(packageRoot(), 'responses');
-  mkdirSync(dir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const path = join(dir, `${provider}-ask-${stamp}.md`);
-  const body = `# ${provider} response (${stamp})\n\n${outcome.response}\n\n---\n\n## Markdown\n\n${outcome.markdown ?? '(none)'}\n`;
-  writeFileSync(path, body);
-  const preview = outcome.response.slice(0, 200);
-  return `Completed (${outcome.response.length} chars).\nPreview: ${preview}${outcome.response.length > 200 ? '…' : ''}\nFull response: ${path}`;
+  const { rec } = storeResponse(provider, outcome.response, outcome.markdown ?? null);
+  return structuredCompact(rec, outcome.response, outcome.completed ? 'completed' : outcome.status);
+}
+
+/** Chunked retrieval by response ID (Perplexity+Grok critique: ID-based, not path-based). */
+export function readResponseChunk(id: string, offset = 0, limit = 4000): { ok: boolean; rec?: ResponseRecord; chunk?: string; error?: string } {
+  // registry may be empty after a restart — lazily scan the responses dir by id
+  if (!registry.has(id) && existsSync(join(RESPONSES_DIR(), `${id}.md`))) {
+    const path = join(RESPONSES_DIR(), `${id}.md`);
+    try {
+      const body = readFileSync(path, 'utf8');
+      const m = body.match(/^# (\S+) response \(([^)]+)\)/m);
+      const now = Date.now();
+      registry.set(id, {
+        id, provider: m?.[1] ?? 'unknown', path,
+        contentHash: simpleHash(body), fullChars: body.length, markdownChars: 0,
+        createdAt: new Date(now).toISOString(), expiresAt: new Date(now + RESPONSE_TTL_MS).toISOString(),
+      });
+    } catch { /* fall through to not-found */ }
+  }
+  const rec = registry.get(id);
+  if (!rec) return { ok: false, error: `unknown responseId: ${id}` };
+  try {
+    const body = readFileSync(rec.path, 'utf8');
+    const chunk = body.slice(offset, offset + limit);
+    return { ok: true, rec, chunk, error: body.length > offset + limit ? `truncated (more at offset ${offset + limit})` : undefined };
+  } catch (e) {
+    return { ok: false, error: `read failed: ${e instanceof Error ? e.message : e}` };
+  }
 }
 
 /** Poll once and render the human/progress view (shared by poll tools). */
 export function renderPoll(poll: PollResult, provider = 'provider'): string {
   if (poll.state === 'completed' && poll.response) {
-    // Full content goes to a file; the tool result stays compact (gateway cap).
-    const { path, bytes } = persistResponse(provider, poll);
-    return compactResult(poll, path) + ` (${bytes} bytes written)`;
+    const { rec } = storeResponse(provider, poll.response, poll.markdown ?? null);
+    return structuredCompact(rec, poll.response, 'completed');
   }
   let out = `Status: ${poll.state.toUpperCase()}\n`;
   if (poll.agentBrowsingUrl) out += `Browsing: ${poll.agentBrowsingUrl}\n`;
@@ -168,13 +256,6 @@ export async function askAndWait(driver: ChatDriver, prompt: string, timeoutMs: 
     agentBrowsingUrl: final.agentBrowsingUrl,
     timedOut: true,
   };
-}
-
-/** FNV-1a content hash — same as the drivers use for PollResult.contentHash. */
-function simpleHash(s: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
-  return h.toString(16);
 }
 
 /** Render the "still in progress" view (preserves comet_ask's message shape). */

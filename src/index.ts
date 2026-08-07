@@ -22,7 +22,10 @@ import {
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { cometClient } from "./cdp-client.js";
-import { getDriver, listDrivers, normalizePrompt, askAndWait, renderPoll, renderInProgress, compactAskResult } from "./drivers/index.js";
+import { getDriver, listDrivers, normalizePrompt, askAndWait, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention } from "./drivers/index.js";
+
+// Retention sweep on startup (expired responses cleaned before serving).
+enforceRetention();
 
 const TOOLS: Tool[] = [
   {
@@ -129,6 +132,19 @@ const TOOLS: Tool[] = [
         provider: { type: "string", description: "Provider name: perplexity, grok" },
       },
       required: ["provider"],
+    },
+  },
+  {
+    name: "provider_response",
+    description: "Fetch a saved provider response by its responseId (from provider_ask/provider_poll). Chunked retrieval: pass offset/limit for long responses. Returns the response body as text; content is also on disk.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        responseId: { type: "string", description: "responseId returned by provider_ask/provider_poll" },
+        offset: { type: "number", description: "Character offset to start from (default 0)" },
+        limit: { type: "number", description: "Max characters to return (default 4000)" },
+      },
+      required: ["responseId"],
     },
   },
 ];
@@ -436,6 +452,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } catch (error) {
           return { content: [{ type: "text", text: `provider_verify failed: ${error instanceof Error ? error.message : error}` }], isError: true };
         }
+      }
+
+      case "provider_response": {
+        const id = String(args?.responseId ?? '');
+        const offset = (args?.offset as number) ?? 0;
+        const limit = (args?.limit as number) ?? 4000;
+        if (!id) return { content: [{ type: "text", text: "Error: responseId required" }], isError: true };
+        const { ok, rec, chunk, error } = readResponseChunk(id, offset, limit);
+        if (!ok) return { content: [{ type: "text", text: error || 'not found' }], isError: true };
+        return {
+          content: [{ type: "text", text: `${chunk}${error ? `\n[${error}]` : ''}\n\n(responseId ${rec!.id}, ${rec!.fullChars} chars total)` }],
+        };
       }
 
       default:

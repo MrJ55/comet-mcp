@@ -18,11 +18,11 @@
         "sm:max-h-[25vh]"
       ],
       "snippet": "",
-      "confidence": 0.85,
+      "confidence": 0.7,
       "success_count": 3,
-      "last_validated": 1786109747,
+      "last_validated": 1786111480,
       "fingerprint": 736211465,
-      "fail_count": 1,
+      "fail_count": 2,
       "last_sig": "#ask-input-v2"
     },
     "sendButton": {
