@@ -257,10 +257,10 @@ For each provider:
 - [x] Refactor Perplexity behavior into the provider contract without changing user-visible behavior. (`src/drivers/perplexity.ts`, extraction in `src/providers/extraction.ts`, server wired via compat layer; P1 gate smoke passed live 2026-08-07)
 - [x] Preserve and test existing extraction fixes: ordering, truncation, whitespace, escaping, and steps parsing. (9 unit tests in `test/unit/extraction.test.ts`, all passing; port is faithful to verified in-page behavior)
 - [x] Add synthetic fixtures for idle, typing, streaming, complete, login-required, and degraded states. (idle/typing/streaming/completed done for all 5 providers in `test/fixtures/<provider>/`; login-required/degraded pending)
-- [ ] Add a migration path from `comet_*` to `provider_*`.
+- [x] Add a migration path from `comet_*` to `provider_*`. (compat layer: `legacySendPrompt`/`legacyGetAgentStatus`/`legacyStopAgent` in `src/drivers/perplexity.ts` keep `comet_*` tools working over the driver; `provider_*` tool renames arrive with P3's provider_open/list/close/health)
 - [x] Implement conservative Perplexity defaults: relay disabled or approval-required. (`CONSERVATIVE_RELAY_DEFAULTS` in `src/types/conversation.ts`)
 
-**Gate:** ten representative prompts retain existing ask/poll/stop behavior; recovery/replay creates no duplicate send. (runtime gates pending P1 implementation)
+**Gate:** ten representative prompts retain existing ask/poll/stop behavior; recovery/replay creates no duplicate send. — live smoke PASSED 2026-08-07 (ask→poll→completed, real answer extracted); full ten-prompt + replay-safety gate pending (replay safety = event-store runtime, P1 Half 2)
 
 ### P2 — First heterogeneous adapter: Grok
 
