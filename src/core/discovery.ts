@@ -561,8 +561,15 @@ export async function runDiscovery(
 
   const controls: any = {};
   const seedConf = confidenceStart(confidence);
-  if (composer) controls.composer = { selector: composerSel, confidence: seedConf, success_count: 0, fail_count: 0, ...composer, fingerprint: seededFingerprints.composer };
-  if (sendSel) controls.sendButton = { selector: sendSel, confidence: seedConf, success_count: 0, fail_count: 0, fingerprint: seededFingerprints.sendButton };
+  // strip internal ranking markers (__visible/__editable) before persisting
+  const cleanComposer = (c: any) => { const { __visible, __editable, ...rest } = c; return rest; };
+  if (composer) controls.composer = { selector: composerSel, confidence: seedConf, success_count: 0, fail_count: 0, ...cleanComposer(composer), fingerprint: seededFingerprints.composer };
+  // conditionality detection (2026-08-07): a control that was ABSENT at idle but
+  // present after typing is conditional. sendSel was found only after the prompt
+  // was typed, so sendButton is conditional by observation; responseContainer
+  // only exists after a first response (empty-state-conditional). Discovery
+  // marks them so verify skips idle absence instead of punishing it.
+  if (sendSel) controls.sendButton = { selector: sendSel, confidence: seedConf, success_count: 0, fail_count: 0, fingerprint: seededFingerprints.sendButton, conditional: true, condition: 'rendered only after composer has text' };
   if (modelPicker) controls.modelPicker = { selector: bestSelector(modelPicker), confidence: seedConf, success_count: 0, fail_count: 0, ...modelPicker, fingerprint: seededFingerprints.modelPicker };
   if (newChat) controls.newChat = { selector: bestSelector(newChat), confidence: seedConf, success_count: 0, fail_count: 0, ...newChat, fingerprint: seededFingerprints.newChat };
   if (cfg.responseSelectors.length) {
@@ -570,7 +577,8 @@ export async function runDiscovery(
       selector: cfg.responseSelectors[0],
       confidence: seedConf, success_count: 0, fail_count: 0,
       ...(cfg.responseSelectors.length > 1 ? { aliases: cfg.responseSelectors.slice(1) } : {}),
-      condition: 'take the LAST element for the current turn',
+      conditional: true,
+      condition: 'rendered only after the first response — empty-state idle absence is not drift',
     };
   }
 
@@ -610,17 +618,26 @@ export async function runDiscovery(
     const newControlCount = Object.keys(controls).length;
     const newHasSendButton = !!controls.sendButton;
     const existingHasSendButton = !!existing?.controls?.sendButton;
+    // conditional-flag protection: verify skips conditional controls at idle — an
+    // entry that marked a control conditional is strictly better than one that
+    // forgot the flag (empty-state absence would be punished as drift)
+    const newConditionalCount = Object.values(controls).filter((c: any) => c?.conditional === true).length;
+    const existingConditionalCount = existing
+      ? Object.values(existing.controls ?? {}).filter((c: any) => c?.conditional === true).length
+      : 0;
     const confidenceRank = { high: 3, medium: 2, low: 1 } as const;
     const existingBetter =
       existing && (
         (existingHasSendButton && !newHasSendButton) ||
         (existingControlCount > newControlCount) ||
+        (existingConditionalCount > newConditionalCount) ||
         (confidenceRank[existing.confidence] > confidenceRank[confidence])
       );
     if (existingBetter) {
       const why = [
         existingHasSendButton && !newHasSendButton ? `existing has sendButton, new run lost it` : '',
         existingControlCount > newControlCount ? `existing ${existingControlCount} controls > new ${newControlCount}` : '',
+        existingConditionalCount > newConditionalCount ? `existing marks ${existingConditionalCount} controls conditional, new marks ${newConditionalCount}` : '',
         confidenceRank[existing.confidence] > confidenceRank[confidence] ? `existing ${existing.confidence} > new ${confidence}` : '',
       ].filter(Boolean).join('; ');
       console.warn(`[discovery] NOT overwriting ${provider}: ${why}. Existing entry kept.`);
