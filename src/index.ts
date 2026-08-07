@@ -115,6 +115,17 @@ const TOOLS: Tool[] = [
     },
   },
   {
+    name: "provider_reconnect",
+    description: "Re-establish a provider's pooled CDP session (after a drop/restart) and re-hydrate dedup anchors from the durable event store. P3 reconnect-dedup: unchanged content produces no new response event. Falls back to opening a fresh tab if the old one is gone.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: { type: "string", description: "Provider name: perplexity, grok" },
+      },
+      required: ["provider"],
+    },
+  },
+  {
     name: "provider_list",
     description: "List registered provider tabs and their CDP session state (tabId, provider, openedAt, state, dedup anchors).",
     inputSchema: { type: "object", properties: {} },
@@ -486,6 +497,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [{ type: "text", text: `Failed to switch mode: ${clickResult.error}` }],
             isError: true,
           };
+        }
+      }
+
+      case "provider_reconnect": {
+        const provider = String(args?.provider ?? '');
+        const driver = getDriver(provider);
+        if (!driver) return { content: [{ type: "text", text: `Unknown provider: ${provider} (have: ${listDrivers().join(', ')})` }], isError: true };
+        try {
+          const session = await tabRegistry.reconnect(driver.provider);
+          const cursor = session.extractionCursor ?? 'none';
+          return { content: [{ type: "text", text: `provider_reconnect ${provider}: tabId=${session.tabId} state=${session.state} durableCursor=${cursor} — dedup anchors re-hydrated (unchanged content → no new response event)` }] };
+        } catch (error) {
+          return { content: [{ type: "text", text: `provider_reconnect failed: ${error instanceof Error ? error.message : error}` }], isError: true };
         }
       }
 

@@ -18,6 +18,7 @@
 import { sessionPool, TabCapExceededError } from './cdp-pool.js';
 import { cometClient } from './cdp-client.js';
 import { loadEntry } from './core/registry.js';
+import { getCursor } from './core/event-store.js';
 import type { TabSession } from './types/provider.js';
 import type { ProviderId } from './types/conversation.js';
 import type { CDPTarget } from './types.js';
@@ -128,11 +129,44 @@ export class TabRegistry {
     };
     session.provider = provider;
     session.state = 'connected';
+    // P3 reconnect-dedup: hydrate dedup anchors from the DURABLE store so a
+    // re-opened / reconnected session starts from the last recorded extraction
+    // cursor — "unchanged content produces no new response event".
+    const durableCursor = getCursor(provider, targetId);
+    if (durableCursor) {
+      session.extractionCursor = durableCursor;
+      session.lastContentHash = durableCursor; // cursor == contentHash convention
+    }
     this.tabs.set(targetId, session);
 
     const list = this.providerTabs.get(provider) ?? [];
     if (!list.includes(targetId)) list.push(targetId);
     this.providerTabs.set(provider, list);
+    return session;
+  }
+
+  /**
+   * P3 reconnect-dedup: force a fresh pooled CDP session for a provider's tab and
+   * re-hydrate its dedup anchors from the durable store. Returns the session.
+   * If the tab is gone, falls back to opening a fresh one.
+   */
+  async reconnect(provider: ProviderId): Promise<TabSession> {
+    const session = this.getProviderTab(provider);
+    if (!session) return this.open(provider);
+    try {
+      await sessionPool.reconnect(session.targetId);
+    } catch {
+      // target gone — open a fresh tab
+      this.tabs.delete(session.targetId);
+      this.providerTabs.set(provider, (this.providerTabs.get(provider) ?? []).filter((id) => id !== session.targetId));
+      return this.open(provider);
+    }
+    session.state = 'connected';
+    const durableCursor = getCursor(provider, session.targetId);
+    if (durableCursor) {
+      session.extractionCursor = durableCursor;
+      session.lastContentHash = durableCursor;
+    }
     return session;
   }
 

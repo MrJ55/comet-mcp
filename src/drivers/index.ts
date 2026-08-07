@@ -20,7 +20,8 @@ import { grokDriver } from './grok.js';
 import {
   hasIdempotencyKey, getIdempotencyEvent, recordEnvelopeCreated, recordSendEvent,
   recordResponseReceived, recordResponseDeduplicated, recordDeliveryReceipt,
-  eventsForCorrelation, nextSequence, _resetForTests as _eventStoreReset,
+  eventsForCorrelation, hasResponseHash, checkpointCursor,
+  nextSequence, _resetForTests as _eventStoreReset,
 } from '../core/event-store.js';
 import { CONSERVATIVE_RELAY_DEFAULTS, DEFAULT_SEND_BUDGET } from '../types/conversation.js';
 import type { ConversationEnvelope } from '../types/conversation.js';
@@ -102,12 +103,21 @@ export function isCircuitOpen(targetId: string): boolean {
   return !!c && c.openUntil > Date.now();
 }
 
-/** Update a TabSession's dedup anchors (P3; reconnect-dedup gate builds on these). */
+/**
+ * Update a TabSession's dedup anchors (P3; reconnect-dedup gate builds on these).
+ * When the poll shows a completed response, ALSO checkpoint the extraction cursor to
+ * the durable store — a later reconnect re-hydrates from it (tab-registry.poolTab),
+ * so "unchanged content produces no new response event".
+ */
 export function updateSessionAnchors(session: TabSession, poll: PollResult): void {
   if (poll.messageId) session.lastKnownMessageId = poll.messageId;
   if (poll.contentHash) session.lastContentHash = poll.contentHash;
   if (poll.cursor) session.extractionCursor = poll.cursor;
-  if (poll.state === 'completed') session.lastCompletedAt = new Date().toISOString();
+  if (poll.state === 'completed') {
+    session.lastCompletedAt = new Date().toISOString();
+    const cursor = poll.cursor ?? poll.contentHash;
+    if (cursor) checkpointCursor(session.provider, session.targetId, cursor);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +196,8 @@ export interface AskOutcome {
   correlationId?: string;
   /** P1 Half 2: idempotency key of the envelope. */
   idempotencyKey?: string;
+  /** P3 reconnect-dedup: true when content was already recorded (no new response event). */
+  deduped?: boolean;
 }
 
 /** Normalize prompt — convert markdown/bullets to natural text (preserves comet_ask behavior). */
@@ -296,6 +308,7 @@ export function compactAskResult(provider: string, outcome: AskOutcome): string 
   if (outcome.correlationId) extra.correlationId = outcome.correlationId;
   if (outcome.idempotencyKey) extra.idempotencyKey = outcome.idempotencyKey;
   if (outcome.replayed) extra.replayed = true;
+  if (outcome.deduped) extra.deduped = true;
   return structuredCompact(rec, outcome.response, outcome.completed ? 'completed' : outcome.status, extra);
 }
 
@@ -467,20 +480,38 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
         correlationId: envelope.correlationId,
         idempotencyKey: envelope.idempotencyKey,
       };
-      // durable: response.received (+ cursor checkpoint) → delivery.receipt completed
-      const responseEv = recordResponseReceived(
-        { ...envelope, content: prompt },
-        driver.provider,
-        {
-          messageId: last.messageId,
-          contentHash: hash,
-          cursor: last.cursor ?? hash, // durable extraction cursor (P3 reconnect-dedup)
-          state: last.state,
-          text: outcome.response,
-          steps: stepsCollected,
-        },
-        targetId,
-      );
+      // durable: response.received (+ cursor checkpoint) → delivery.receipt completed.
+      // P3 reconnect-dedup gate: if this correlation ALREADY recorded this exact
+      // content hash (reconnect resumed an ask whose response was already logged),
+      // record response.deduplicated instead — NO new response event for unchanged
+      // content. The client still gets the answer; the log stays truthful.
+      const alreadyRecorded = hasResponseHash(envelope.correlationId, hash);
+      const responseEv = alreadyRecorded
+        ? recordResponseDeduplicated(
+            { ...envelope, content: prompt },
+            driver.provider,
+            {
+              messageId: last.messageId,
+              contentHash: hash,
+              cursor: last.cursor ?? hash,
+              state: last.state,
+              text: outcome.response,
+              steps: stepsCollected,
+            },
+          )
+        : recordResponseReceived(
+            { ...envelope, content: prompt },
+            driver.provider,
+            {
+              messageId: last.messageId,
+              contentHash: hash,
+              cursor: last.cursor ?? hash, // durable extraction cursor (P3 reconnect-dedup)
+              state: last.state,
+              text: outcome.response,
+              steps: stepsCollected,
+            },
+            targetId,
+          );
       recordDeliveryReceipt({
         receiptId: `rct-${responseEv.seq}`, // one receipt per attempt, append-only
         envelopeId: envelope.idempotencyKey,
@@ -492,8 +523,9 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
         contentHash: hash,
         providerMessageId: last.messageId,
         cursor: last.cursor ?? hash,
+        details: alreadyRecorded ? 'reconnect-dedup: content already recorded for this correlation' : undefined,
       });
-      return outcome;
+      return alreadyRecorded ? { ...outcome, deduped: true } : outcome;
     }
     prevHash = hash;
   }

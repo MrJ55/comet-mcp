@@ -288,7 +288,7 @@ For each provider:
 - [x] Add `provider_open`, `provider_list`, `provider_close`, `provider_health`, and `provider_override`.
 - [x] Persist overrides. (provider_override writes entries via registry writeEntry)
 - [x] Add `lastKnownMessageId`, extraction cursor/version, content hash, and `lastCompletedAt`. (updateSessionAnchors on poll; fields populate)
-- [ ] Implement reconnect logic that does not produce duplicate response events. — **event-store runtime now DONE (`src/core/event-store.ts`, P1 Half 2 2026-08-07): durable cursor checkpoints + `hasResponseHash` substrate exist; the P3 tab-reconnect wiring against them remains**
+- [x] Implement reconnect logic that does not produce duplicate response events. — **DONE 2026-08-07**: durable cursor checkpoints re-hydrated into sessions on reconnect (tab-registry.poolTab/reconnect), completion path dedups via correlation-scoped hasResponseHash → response.deduplicated (no new response event); provider_reconnect tool; live gate PASSED (12/12)
 
 **Gate:** Perplexity and Grok can be opened, asked, polled, reset, and closed independently; closing or degrading one does not affect the other.
 
