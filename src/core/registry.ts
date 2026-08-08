@@ -11,7 +11,7 @@
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import type { ProviderEntry, ProviderControl, ProviderControlName } from '../types/provider.js';
+import type { ProviderEntry, ProviderControl, ProviderControlName, ProviderDriver } from '../types/provider.js';
 import type { ProviderId } from '../types/conversation.js';
 
 /** Package root = dir containing package.json, found by walking up from this file. */
@@ -91,14 +91,31 @@ export function validateEntry(raw: unknown): { ok: true; entry: ProviderEntry } 
   return { ok: true, entry: raw as ProviderEntry };
 }
 
-/** Load one entry file. */
+/** Load one entry file. P6: merges the hand-authored driver section from
+ * entries/<p>.driver.json (separate file — discovery never overwrites it, R1). */
 export function loadEntry(provider: ProviderId): ProviderEntry | null {
   const path = join(ENTRIES_DIR, `${provider}.json`);
   if (!existsSync(path)) return null;
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
     const result = validateEntry(raw);
-    return result.ok ? result.entry : null;
+    if (!result.ok) return null;
+    const entry = result.entry;
+    entry.driver = loadDriverSection(provider) ?? undefined;
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+/** Load the hand-authored driver section for a provider (null when absent). */
+export function loadDriverSection(provider: ProviderId): ProviderDriver | null {
+  const path = join(ENTRIES_DIR, `${provider}.driver.json`);
+  if (!existsSync(path)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    if (!raw || typeof raw !== 'object') return null;
+    return raw as ProviderDriver;
   } catch {
     return null;
   }
@@ -117,11 +134,14 @@ export function loadAllEntries(): Map<ProviderId, ProviderEntry> {
   return map;
 }
 
-/** Persist an entry produced by discovery. Returns the written path. */
+/** Persist an entry produced by discovery. Returns the written path.
+ * P6: the hand-authored `driver` section is STRIPPED before writing — it lives
+ * in entries/<p>.driver.json and discovery must never clobber it (R1). */
 export function writeEntry(entry: ProviderEntry): string {
   mkdirSync(ENTRIES_DIR, { recursive: true });
   const path = join(ENTRIES_DIR, `${entry.provider}.json`);
-  writeFileSync(path, JSON.stringify(entry, null, 2) + '\n');
+  const { driver: _driver, ...discoveryOwned } = entry;
+  writeFileSync(path, JSON.stringify(discoveryOwned, null, 2) + '\n');
   return path;
 }
 

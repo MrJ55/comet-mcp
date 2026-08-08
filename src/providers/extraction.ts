@@ -87,6 +87,57 @@ export function cleanResponse(response: string, uiPhrases: RegExp = UI_PHRASES):
 }
 
 /**
+ * P6: generalized assistant-turn extraction for the entry-driven drivers
+ * (gemini/chatgpt/claude). Response containers are collected per provider
+ * (model-response / [data-message-author-role="assistant"] / div.font-claude-response);
+ * the LAST one is the current turn (preferLast — the common pattern). Provider
+ * prose strips (disclaimers, UI residue) ride in as regexes.
+ */
+export interface AssistantTurnResult {
+  response: string;
+  joinedProseBlocks: boolean;
+  truncatedFromEnd: boolean;
+  dedupedByContainment: boolean;
+}
+
+export function extractAssistantTurn(
+  messages: string[],
+  opts: { preferLast?: boolean; strip?: RegExp; uiPrefixes?: readonly string[] } = {},
+): AssistantTurnResult {
+  const preferLast = opts.preferLast !== false;
+  const pool = preferLast && messages.length > 0 ? [messages[messages.length - 1]] : messages;
+  // Light filter — the pool is already pre-selected response containers (one turn),
+  // so short PONG answers like "OK" / "READY" must survive (unlike the multi-block
+  // perplexity prose path where len > 5 is meaningful). Drop empties, UI prefixes,
+  // and pure-punctuation residue only.
+  const ui = opts.uiPrefixes ?? [];
+  const filtered = pool
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0)
+    .filter((t) => !ui.some((u) => t.startsWith(u)))
+    .filter((t) => !/^[\s\d\W_]+$/.test(t));
+  const deduped = dedupeByContainment(filtered);
+  let response = deduped.join('\n\n');
+  if (opts.strip) response = response.replace(opts.strip, '');
+  if (response) response = cleanResponse(response);
+  const truncated = response.length > RESPONSE_CAP;
+  if (truncated) response = response.slice(-RESPONSE_CAP);
+  return {
+    response,
+    joinedProseBlocks: pool.length > 1,
+    dedupedByContainment: deduped.length < pool.length,
+    truncatedFromEnd: truncated,
+  };
+}
+
+/** Provider prose strips for the entry-driven drivers (P6). */
+export const ASSISTANT_TURN_STRIPS: Record<string, RegExp> = {
+  gemini: /Gemini can make mistakes[^]*?check important info\.?/gi,
+  chatgpt: /Learn more|Cite sources|Sources\b/gi,
+  claude: /Copy|Thumbs up|Thumbs down/gi,
+};
+
+/**
  * Full extraction pipeline: filter → dedupe → join → clean → keep newest.
  * Returns the response + the extraction-provenance flags (P1 fix lineage).
  */

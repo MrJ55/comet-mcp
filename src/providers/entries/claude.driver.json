@@ -1,0 +1,24 @@
+{
+  "typing": "insertText",
+  "submit": {
+    "method": "click-after-type",
+    "verify": "composer-emptied",
+    "enterSends": false
+  },
+  "signals": {
+    "working": { "kind": "stop-control" },
+    "completed": { "kind": "stop-absent" },
+    "login": [
+      "Sign in to Claude",
+      "Log in to Claude",
+      "You are signed out",
+      "Session expired",
+      "Sign in to continue"
+    ],
+    "blocked": []
+  },
+  "markdown": "claude",
+  "freshChatByNavigation": true,
+  "reset": { "method": "navigate", "url": "https://claude.ai/new" },
+  "extraction": { "preferLast": true }
+}

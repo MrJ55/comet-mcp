@@ -76,7 +76,7 @@ export interface TabSession {
   state: 'connected' | 'degraded' | 'closed';
 }
 
-/** Structured health (ADR 0001 §Operational safeguards 3). */
+/** Structured health (ADR 0001 §Operational safeguards 3; P6-gate surface, Grok review). */
 export interface HealthReport {
   provider: ProviderId;
   healthy: boolean;
@@ -86,7 +86,15 @@ export interface HealthReport {
   hookResolution: {
     control: string;
     source: 'known-selector' | 'heuristic' | 'override' | 'missing';
+    /** P6: learned confidence of the control (0..1). */
+    confidence?: number;
+    /** P6: how the selector was located (mirrors source). */
+    foundVia?: 'discovery' | 'fingerprint-rebind' | 'override' | 'heuristic';
   }[];
+  /** P6: live probe of the working signal (stop control / indicator). */
+  workingSignal?: { observed: boolean; kind?: string; note?: string };
+  /** P6: last time controls were verified successfully (epoch of newest last_validated, or lastCheckedAt). */
+  lastVerifiedAt?: string;
   lastCheckedAt: string;
   note?: string;
 }
@@ -132,6 +140,55 @@ export type ProviderControlName =
   | 'workingIndicator'
   | 'responseContainer';
 
+// ---------------------------------------------------------------------------
+// P6: driver-contract section (Grok design review 2026-08-08 — approved).
+// Hand-authored behavioral config, stored SEPARATELY from the discovery-owned
+// entry (src/providers/entries/<p>.driver.json, merged at load). Discovery
+// regenerates only <p>.json and never touches the driver file (R1 closed).
+// ---------------------------------------------------------------------------
+
+/** How the driver types into the composer. key-events = execCommand-interception escape hatch. */
+export type DriverTyping = 'insertText' | 'value-input' | 'key-events';
+
+/** Submit contract. Claude: click-after-type (button appears after typing; Enter alone does NOT submit — 774e875). */
+export interface DriverSubmit {
+  method: 'enter' | 'click' | 'click-after-type';
+  /** Overrides sendButton for submit when present. */
+  selector?: string;
+  /** Mandatory verification before a receipt may claim `sent` (Grok review). */
+  verify: 'composer-emptied' | 'loading-indicator' | 'response-started';
+  /** False when Enter alone does not submit (claude). */
+  enterSends?: boolean;
+}
+
+/** Poll-observable signals that drive the state machine. */
+export interface DriverSignals {
+  /** Presence of this signal ⇒ streaming/working. Generic stop-control scan when no selector given. */
+  working?: { kind: 'stop-control' | 'indicator' | 'growing-content'; selector?: string };
+  /** Absence of this condition ⇒ completed (default path: stop-control absent + hash stable). */
+  completed?: { kind: 'stop-absent' | 'hash-stable' | 'response-present' };
+  /** Body-text / URL patterns that ⇒ login_required. */
+  login?: string[];
+  /** Body-text / URL patterns that ⇒ blocked (CAPTCHA, rate limit). */
+  blocked?: string[];
+}
+
+/** P6 driver contract — everything the shared BaseChatDriver needs to be entry-driven. */
+export interface ProviderDriver {
+  typing: DriverTyping;
+  submit: DriverSubmit;
+  signals?: DriverSignals;
+  /** Native message-id attribute on the response element (chatgpt: data-message-id). Optional — contentHash is the durable anchor. */
+  messageId?: { attr: string };
+  /** preClean variant name in src/providers/markdown.ts. */
+  markdown?: string;
+  /** claude: /recents has no composer → fresh chat via /new navigation. */
+  freshChatByNavigation?: boolean;
+  reset?: { method: 'url' | 'control' | 'navigate'; url?: string };
+  /** Response container selection: take the LAST matching element (common pattern). */
+  extraction?: { preferLast?: boolean };
+}
+
 /**
  * A provider registry entry: known selectors + constrained heuristics + capability
  * evidence + discovery metadata. Stored as JSON in src/providers/entries/ and loaded
@@ -158,6 +215,8 @@ export interface ProviderEntry {
     /** Only the states this provider can express. */
     stateMachine: Partial<Record<ProviderState, string>>;
   };
+  /** P6: hand-authored driver contract (merged from entries/<p>.driver.json at load). */
+  driver?: ProviderDriver;
 }
 
 /**

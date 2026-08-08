@@ -17,6 +17,9 @@ import { sessionPool } from '../cdp-pool.js';
 import { tabRegistry } from '../tab-registry.js';
 import { perplexityDriver } from './perplexity.js';
 import { grokDriver } from './grok.js';
+import { geminiDriver } from './gemini.js';
+import { chatgptDriver } from './chatgpt.js';
+import { claudeDriver } from './claude.js';
 import {
   hasIdempotencyKey, getIdempotencyEvent, recordEnvelopeCreated, recordSendEvent,
   recordResponseReceived, recordResponseDeduplicated, recordDeliveryReceipt,
@@ -29,6 +32,10 @@ import type { ConversationEnvelope } from '../types/conversation.js';
 const DRIVERS: Record<string, ChatDriver> = {
   perplexity: perplexityDriver,
   grok: grokDriver,
+  // P6 (2026-08-08): entry-driven adapters on BaseChatDriver — all five askable.
+  gemini: geminiDriver,
+  chatgpt: chatgptDriver,
+  claude: claudeDriver,
 };
 
 /** Resolve a driver by provider name, or null for unknown. */

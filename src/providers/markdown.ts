@@ -50,6 +50,19 @@ function preClean(provider: string, html: string): string {
     case 'grok':
       // timing line Grok renders inside the message (handled in text path too)
       return html;
+    case 'gemini':
+      // Gemini disclaimer + citation card residue inside model-response
+      return html
+        .replace(/<div[^>]*class="[^"]*disclaimer[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '')
+        .replace(/<div[^>]*class="[^"]*citation[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '');
+    case 'chatgpt':
+      // ChatGPT citation/source chips + copy buttons inside the assistant turn
+      return html
+        .replace(/<button[^>]*>[\s\S]*?<\/button>/gi, '')
+        .replace(/<div[^>]*class="[^"]*citation[^"]*"[^>]*>[\s\S]*?<\/div>/gi, '');
+    case 'claude':
+      // Claude copy/feedback UI inside font-claude-response
+      return html.replace(/<button[^>]*>[\s\S]*?<\/button>/gi, '');
     default:
       return html;
   }
