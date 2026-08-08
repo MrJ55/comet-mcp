@@ -24,9 +24,33 @@ MCP client -> control plane -> conversation fabric -> provider adapters -> Comet
 | P3 | Concurrent tab registry and CDP session pool | Perplexity and Grok operate independently | ✅ DONE — audit + registry/pool + 6 provider tools + reconnect-dedup (2026-08-07: bfe1a24, 5333aea, 8a90456, f8a98c7); live gates PASSED: pool 5/5 real tabs, independent operation, reconnect-dedup (unchanged content → no new response event), cap-leak fixed |
 | P4 | Approval-required relay with provenance and receipts | Safe relay succeeds or fails explicitly | ⬜ not started — substrate ready (receipt stream + idempotency in event store); re-sequenced AFTER P6 (relay benefits from all 5 drivers) |
 | P5 | `wait_any` and bounded scheduler | Plans halt/resume without duplicate sends | ⬜ not started (P5a wait_any is the ship-boundary demo); re-sequenced AFTER P6 (wait_any across 5 real providers) |
-| P6 | Gemini, ChatGPT, and Claude.ai adapters | Each has structured degradation handling | 🟡 **NEXT IN SEQUENCE (bumped 2026-08-07)** — discovery done for all 5 (entries HIGH; claude discovery completes via button-click submit, 774e875); driver impls pending — only perplexity+grok askable |
+| P6 | Gemini, ChatGPT, and Claude.ai adapters | Each has structured degradation handling | ✅ DONE — entry-driven adapters on BaseChatDriver (2026-08-08: 238f440, 4a4cd4d) — `ProviderDriver` schema + separate `entries/<p>.driver.json` merged at load (R1 closed), thin drivers, per-provider state-machine fixtures via jsdom harness, structured health surface (workingSignal/lastVerifiedAt/foundVia/confidence) = P6 gate; 94/94 unit tests; live-validated: gemini/chatgpt/claude PONG under the 8s window (opportunistic gate `test/integration/p6-live-gate.mjs`) |
 | P7 | Optional fanout, critique, routing, and debate | All features obey budgets and relay policy | ⬜ not started |
 | P8 | Observability and operational hardening | Drift, failures, and delivery state are diagnosable | 🟡 drift tooling exists (provider_verify/ADRs 0002-0003); hardening pending |
+
+## Entry-driven adapter coverage is live (P6, 2026-08-08)
+
+All five providers are askable. The three P6 adapters (gemini/chatgpt/claude)
+are entry-driven on `src/drivers/base.ts` — a thin interpreter of a new
+`ProviderDriver` section (`src/types/provider.ts`): typing mode, data-driven
+submit contract (`{enter|click|click-after-type}`), working/completed/login/
+blocked signals, messageId anchor, markdown preClean variant, reset method.
+Driver sections live in `src/providers/entries/<p>.driver.json` and are merged
+at load in the registry — discovery regenerates only `<p>.json` and never
+clobbers them (ADR 0006, R1 closed by construction).
+
+Live-validation findings folded back (2026-08-08): chatgpt's discovery entry
+had caught the hidden fallback textarea — composer re-pointed at the visible
+contenteditable (`[aria-label="Chat with ChatGPT"][contenteditable="true"]`,
+typing insertText); claude's idle UI has an svg-rect button ("Use voice mode")
+that the generic stop scan false-positived — claude now uses a scoped stop
+selector; the submit ladder retries the conditional send button (hydration
+latency, live-verified claude /new).
+
+The P6 gate (Grok review): completed NEVER returns an empty response — a
+missing/empty response container at completion detection degrades instead;
+`provider_health` surfaces workingSignal + lastVerifiedAt + per-control
+confidence/foundVia for all five drivers.
 
 ## Discovery is a shipped tool (2026-08-07)
 

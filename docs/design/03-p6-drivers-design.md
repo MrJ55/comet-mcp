@@ -217,16 +217,16 @@ Integration (opt-in, `test/integration/`):
 
 ## 10. Task checklist (dependency order)
 
-- [ ] **T1** Extend `src/types/provider.ts`: `ProviderEntry.driver` + `HealthReport` fields (foundVia/confidence/workingSignal/lastVerifiedAt live semantics).
-- [ ] **T2** Author `src/providers/entries/{gemini,chatgpt,claude}.driver.json` per matrix §5 (separate-file — R1 closed by construction); wire registry merge-at-load; validate against fixtures.
-- [ ] **T3** `src/drivers/base.ts`: shared handleFor/evalValue/resolveControl, entry-driven POLL_SCRIPT generator, typeInto, submit ladder, determineState (never silent-empty), health loop, named override hooks.
-- [ ] **T4** Drivers `gemini.ts`, `chatgpt.ts`, `claude.ts` (thin subclasses + override hooks: claude freshChat via `/new`).
-- [ ] **T5** Register the three in `DRIVERS` (`src/drivers/index.ts`).
-- [ ] **T6** Extraction additions + markdown `preClean` cases (§7), fixture-verified.
-- [ ] **T7** Fixtures: streaming/login/blocked (+ claude typing-with-send-button); jsdom devDep + `state-machine-harness.ts`.
-- [ ] **T8** Unit tests (§9.1-4). Full suite green (target: ~85-90 tests).
-- [ ] **T9** `p6-live-gate.mjs` + MCP-only smoke through pi (dedicated test tabs; PONG prompts only).
-- [ ] **T10** Docs: `docs/build-plan.md` P6 row, Turn-02 checkboxes, ADR 0006 (driver-contract in entries), `open-items.md`; update wiki/Vestige at pack.
+- [x] **T1** Extend `src/types/provider.ts`: `ProviderEntry.driver` + `HealthReport` fields (foundVia/confidence/workingSignal/lastVerifiedAt live semantics).
+- [x] **T2** Author `src/providers/entries/{gemini,chatgpt,claude}.driver.json` per matrix §5 (separate-file — R1 closed by construction); wire registry merge-at-load; validate against fixtures.
+- [x] **T3** `src/drivers/base.ts`: shared handleFor/evalValue/resolveControl, entry-driven POLL_SCRIPT generator, typeInto, submit ladder, determineState (never silent-empty), health loop, named override hooks.
+- [x] **T4** Drivers `gemini.ts`, `chatgpt.ts`, `claude.ts` (thin subclasses + override hooks: claude freshChat via `/new`).
+- [x] **T5** Register the three in `DRIVERS` (`src/drivers/index.ts`).
+- [x] **T6** Extraction additions + markdown `preClean` cases (§7), fixture-verified.
+- [x] **T7** Fixtures: streaming/login/blocked (+ claude typing-with-send-button); jsdom devDep + `state-machine-harness.ts` (`test/unit/p6-harness.ts`).
+- [x] **T8** Unit tests (§9.1-4). Full suite green — **94/94** (24 new P6).
+- [x] **T9** `p6-live-gate.mjs` + MCP-only smoke through pi (dedicated test tabs; PONG prompts only). Live-validated all three (PONG + markdown under the 8s window); gate is opportunistic — environment variance (tab churn, hydration, rate limits) on the shared browser, fixtures remain the deterministic gate.
+- [ ] **T10** Docs: `docs/build-plan.md` P6 row, Turn-02 checkboxes, ADR 0006 (driver-contract in entries), `open-items.md`; update wiki/Vestige at pack. — in progress
 
 ## 11. Decisions for review
 

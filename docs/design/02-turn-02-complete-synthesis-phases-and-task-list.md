@@ -327,18 +327,18 @@ For each provider:
 
 ### P6 — Expand adapter coverage
 
-**Outcome:** Gemini, ChatGPT, and Claude.ai join through the same adapter process.
+**Outcome:** Gemini, ChatGPT, and Claude.ai join through the same adapter process. ✅ **DONE 2026-08-08** (238f440, 4a4cd4d) — all five providers askable via entry-driven adapters on `src/drivers/base.ts`.
 
 **Re-scoped (both critiques, 2026-08-07):** discovery for all five providers already shipped as a CLI/MCP tool, so P6 shrinks to driver implementation + per-provider typing/markdown quirks + login-expiry simulation. Do NOT re-run the full discovery workflow.
 
 **NEXT IN SEQUENCE (bumped 2026-08-07, ahead of P4/P5):** no P4/P5 dependency gates the drivers — P6 is adapter-layer work (ChatDriver contract), P4/P5 are fabric-layer (relay policy, scheduling); the shared ask machinery (async dispatch c206970, 8s stability window) and all 5 HIGH entries are ready. P6-first also gives P4/P5 real multi-provider test surfaces.
 
 - [x] Repeat discovery, fixture, health, and `PONG` validation for each provider. (all 5 providers live-verified 2026-08-06/07 — ACK/PONG/ALPHA/OK/BRAVO validations, HIGH-confidence entries in `src/providers/entries/*.json`, discovery shipped as CLI + MCP tools, PR #10)
-- [ ] Add provider-specific markdown and typing settings. (shared `markdown.ts` innerHTML+turndown and typing modes insertText|keyEvents exist; select the right combo per entry, handle residual ProseMirror/contenteditable quirks — Grok consultation 2026-08-07)
-- [ ] Simulate missing hooks and login expiry for each adapter. (exercise `login_required`/`degraded`/`blocked` states the entries already model; Grok rate-limit observed live 2026-08-07)
-- [ ] Keep provider-specific code minimal; add driver overrides only when configuration cannot express the behavior. (config-driven = migration-friendly for the typed-adapter core)
-- [ ] **Exercise the full modeled state machine per driver** (idle/typing/streaming/completed/login_required/degraded/blocked) via fixtures + at least one live validation under the 8s stability window. (Grok consultation 2026-08-07 tightening)
-- [ ] **Wire structured health as a first-class deliverable** — `provider_health` must surface the same fields as the Perplexity/Grok drivers (foundVia, confidence, workingSignal, last high-confidence verification); a missing selector must never collapse to a silent empty response. (Grok consultation 2026-08-07 tightening — this is the P6 gate)
+- [x] Add provider-specific markdown and typing settings. (`entries/<p>.driver.json` typing modes + markdown preClean variants for gemini/chatgpt/claude; shared `markdown.ts` switch; live fixes: chatgpt visible contenteditable composer, claude scoped stop selector — 2026-08-08)
+- [x] Simulate missing hooks and login expiry for each adapter. (state-machine fixtures login.html/blocked.html/error.html per provider; `login_required`/`blocked`/`degraded` exercised via jsdom harness — 2026-08-08)
+- [x] Keep provider-specific code minimal; add driver overrides only when configuration cannot express the behavior. (three drivers are pure `BaseChatDriver` subclasses — zero provider-specific prose in code; everything lives in `ProviderDriver` — config-driven = migration-friendly for the typed-adapter core)
+- [x] **Exercise the full modeled state machine per driver** (idle/typing/streaming/completed/login_required/degraded/blocked) via fixtures + at least one live validation under the 8s stability window. (jsdom harness runs the real in-page scripts against fixtures; live: gemini/chatgpt/claude PONG under the window — opportunistic gate `test/integration/p6-live-gate.mjs`, 2026-08-08)
+- [x] **Wire structured health as a first-class deliverable** — `provider_health` surfaces foundVia/confidence/workingSignal/lastVerifiedAt/live loginRequired; missing selector never collapses to a silent empty response (`determineState` degrades instead — explicit unit gate). (2026-08-08 — this was the P6 gate, PASSED)
 - [ ] Validate per-provider relay policy before enabling relay. — **deferred to after P4** (no relay policy exists until P4; not a gate on the drivers)
 
 **Implementation pattern (Grok consultation 2026-08-07, typed-adapter migration):**
@@ -348,7 +348,7 @@ For each provider:
 - Truly divergent logic (Grok timing-line, Claude conditional send) behind narrow named override hooks the typed core absorbs later.
 - Instrument every driver with the same observability (foundVia, confidence, lastVerifiedAt, contentHash, cursor) — the future multi-tab observation layer consumes these.
 
-**Gate:** all five providers report structured health and degrade independently; a missing selector never becomes a silent empty response. — discovery/verify tooling exists (ADR 0002/0003); structured per-adapter health wiring is a first-class P6 deliverable
+**Gate:** all five providers report structured health and degrade independently; a missing selector never becomes a silent empty response. ✅ **PASSED 2026-08-08** — structured per-adapter health wired in `src/drivers/base.ts` (hookResolution source/confidence/foundVia, workingSignal probe, loginRequired probe, lastVerifiedAt); completed-with-empty rejected by `determineState` (unit-tested).
 
 ### P7 — Optional conversation patterns
 
