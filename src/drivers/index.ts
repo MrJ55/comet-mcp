@@ -632,6 +632,9 @@ export function renderInProgress(outcome: AskOutcome, useCometNames = false): st
   if (outcome.status === 'abandoned') {
     return `Ask abandoned — hard TTL (${Math.round(HARD_TTL_MS / 60000)} min) reached without completion.\nStatus: ABANDONED`;
   }
+  if (outcome.status === 'tab_closed') {
+    return `Provider tab closed or went offline — the ask cannot complete.\nStatus: TAB_CLOSED\n\nReopen the provider tab and re-ask if needed.`;
+  }
   let msg = `Task in progress (${outcome.steps.length} steps so far).\n`;
   msg += `Status: ${outcome.status.toUpperCase()}\n`;
   if (outcome.currentStep) msg += `Current: ${outcome.currentStep}\n`;
@@ -801,6 +804,30 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
     updateSessionAnchors(session, poll);
   } catch {
     recordPollFailure(targetId);
+    // 2026-08-08 (closed-window hang, user-reported): if the pooled session is
+    // dead — the tab was closed OUTSIDE the bridge (browser-side) — escalate to a
+    // terminal TAB_CLOSED state instead of treating it as a transient poll
+    // failure and watching a dead target forever.
+    const handle = sessionPool.get(targetId);
+    const alive = handle ? await handle.isHealthy().catch(() => false) : false;
+    if (!alive) {
+      pendingAsks.delete(key);
+      recordSendEvent({ ...envelope, content: p.prompt }, 'send.blocked');
+      recordDeliveryReceipt({
+        receiptId: `rct-${Date.now().toString(36)}`,
+        envelopeId: envelope.idempotencyKey,
+        correlationId: envelope.correlationId,
+        idempotencyKey: envelope.idempotencyKey,
+        status: 'blocked', recordedAt: new Date().toISOString(), attempt: 1,
+        details: 'provider tab closed/offline — ask cannot complete',
+      });
+      return {
+        completed: false, response: '', markdown: null, steps: p.stepsCollected,
+        currentStep: '', status: 'tab_closed',
+        agentBrowsingUrl: '', timedOut: true,
+        correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
+      };
+    }
     return null; // transient — keep pending, client retries poll
   }
   p.last = poll;

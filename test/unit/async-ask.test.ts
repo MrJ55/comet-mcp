@@ -21,6 +21,7 @@ import {
   reapExpired, HARD_TTL_MS,
 } from '../../dist/drivers/index.js';
 import { eventsForCorrelation } from '../../dist/core/event-store.js';
+import { sessionPool } from '../../dist/cdp-pool.js';
 
 // fake driver: first poll (before-snapshot) is empty; subsequent polls return the
 // completed answer — so sawNewResponse becomes true, then the stability window holds.
@@ -105,6 +106,7 @@ function receiptCounts(correlationId: string) {
     completed: receipts.filter((r: any) => r.receiptStatus === 'completed').length,
     completed_late: receipts.filter((r: any) => r.receiptStatus === 'completed_late').length,
     abandoned: receipts.filter((r: any) => r.receiptStatus === 'abandoned').length,
+    blocked: receipts.filter((r: any) => r.receiptStatus === 'blocked').length,
     received: evs.filter((e) => e.type === 'response.received').length,
   };
 }
@@ -181,4 +183,35 @@ test('2026-08-08: reaper — purges entries past HARD_TTL regardless of polling,
   assert.ok(purged >= 1, `reaper purged ${purged} abandoned entr(ies)`);
   assert.ok(!isAskPending(key), 'purged entry no longer pending');
   assert.equal(receiptCounts(dispatched.correlationId).abandoned, 1, 'abandoned receipt recorded');
+});
+
+test('2026-08-08: closed tab — advance escalates to TAB_CLOSED, never watches forever (user-reported hang)', async () => {
+  // driver whose poll throws AFTER the before-snapshot (target died mid-ask)
+  let polls = 0;
+  const d = {
+    provider: 'grok',
+    open: async () => ({ provider: 'grok', tabId: 't2', targetId: 't2', cdpSessionId: 'ws://x', openedAt: '', state: 'connected' }),
+    ask: async () => ({ receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'sent', recordedAt: '' } }),
+    poll: async () => {
+      polls++;
+      if (polls === 1) return { state: 'idle', steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '', contentHash: undefined };
+      throw new Error('CDP session unhealthy (target closed)');
+    },
+    stop: async () => true,
+    reset: async () => {},
+    health: async () => ({ provider: 'grok', healthy: false, loginRequired: false, degraded: true, hookResolution: [], lastCheckedAt: '' }),
+  };
+  const session = await d.open();
+  const origGet = sessionPool.get.bind(sessionPool);
+  (sessionPool as any).get = () => ({ isHealthy: async () => false }); // dead session
+  try {
+    const dispatched = await dispatchAsk(d, session, 'PONG?', { timeoutMs: 60000 });
+    const r = await advanceAsk(dispatched.idempotencyKey);
+    assert.equal(r?.status, 'tab_closed', 'terminal TAB_CLOSED escalation');
+    assert.equal(r?.completed, false);
+    assert.ok(!isAskPending(dispatched.idempotencyKey), 'terminal — entry removed, no watching');
+    assert.equal(receiptCounts(dispatched.correlationId).blocked, 1, 'blocked receipt recorded');
+  } finally {
+    (sessionPool as any).get = origGet;
+  }
 });
