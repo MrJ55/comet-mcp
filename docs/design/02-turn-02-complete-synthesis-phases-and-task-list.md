@@ -309,6 +309,8 @@ For each provider:
 
 **Gate:** a selected Perplexity or Grok answer can be relayed to the other only after approval, with a complete event trail and safe failure behavior.
 
+**Reviewed + re-sequenced 2026-08-08** (Grok + Claude consultations, both in `responses/`): the task list is analyzed in `docs/design/05-p4-relay-design.md` — build order R1-R9 (envelope canonicalization → ContentPersistenceMode → policy → prepare → approve → send → reconciliation → crossed-axis tests → docs); local summarization handoff deferred to P4b; unknown-delivery reconciliation inherits the async-ask state machine including a `RELAY_SURFACE_GONE` terminal (closed-tab escalation analogue); `wait_any` (P5) held until reconciliation stabilizes.
+
 ### P5 — Bounded scheduling and efficient waiting
 
 **Outcome:** clients can coordinate long-running tasks without noisy polling or runaway loops.

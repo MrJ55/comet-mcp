@@ -22,9 +22,9 @@ MCP client -> control plane -> conversation fabric -> provider adapters -> Comet
 | P1 | Conversation fabric and Perplexity contract refactor | Existing behavior preserved; replay-safe deliveries | ✅ DONE — types + Perplexity driver + event-store runtime (ADR 0002, `src/types/conversation.ts`, `src/drivers/perplexity.ts`, `src/core/event-store.ts` — append-only JSONL + idempotency index + durable cursors + receipt stream, 357f7ea); replay-safety proven live (p1-replay-smoke: same idempotencyKey → prior outcome, no dup send) |
 | P2 | Grok adapter and discovery pipeline | Ask/poll/stop/health PONG validation passes | ✅ DONE — Perplexity + Grok drivers live-validated (ADR 0004: markdown via turndown, provider dispatcher + `provider_ask/poll/stop` MCP tools, `comet_*` aliases); 28 tests; verified in pi |
 | P3 | Concurrent tab registry and CDP session pool | Perplexity and Grok operate independently | ✅ DONE — audit + registry/pool + 6 provider tools + reconnect-dedup (2026-08-07: bfe1a24, 5333aea, 8a90456, f8a98c7); live gates PASSED: pool 5/5 real tabs, independent operation, reconnect-dedup (unchanged content → no new response event), cap-leak fixed |
-| P4 | Approval-required relay with provenance and receipts | Safe relay succeeds or fails explicitly | ⬜ not started — substrate ready (receipt stream + idempotency in event store); re-sequenced AFTER P6 (relay benefits from all 5 drivers) |
-| P5 | `wait_any` and bounded scheduler | Plans halt/resume without duplicate sends | ⬜ not started (P5a wait_any is the ship-boundary demo); re-sequenced AFTER P6 (wait_any across 5 real providers) |
-| P6 | Gemini, ChatGPT, and Claude.ai adapters | Each has structured degradation handling | ✅ DONE — entry-driven adapters on BaseChatDriver (2026-08-08: 238f440, 4a4cd4d) — `ProviderDriver` schema + separate `entries/<p>.driver.json` merged at load (R1 closed), thin drivers, per-provider state-machine fixtures via jsdom harness, structured health surface (workingSignal/lastVerifiedAt/foundVia/confidence) = P6 gate; 94/94 unit tests; live-validated: gemini/chatgpt/claude PONG under the 8s window (opportunistic gate `test/integration/p6-live-gate.mjs`) |
+| P4 | Approval-required relay with provenance and receipts | Safe relay succeeds or fails explicitly | 🟡 DESIGNED 2026-08-08 (docs/design/05 — grok + claude reviewed: 3-tool surface, CAS approval binding, security-first markdown, surface-gone terminal; summarization → P4b); ⬜ not started — substrate ready (receipt stream + idempotency in event store) |
+| P5 | `wait_any` and bounded scheduler | Plans halt/resume without duplicate sends | ⬜ not started — **wait_any HELD until P4 reconciliation stabilizes** (single-item state must be trustworthy before composing over many items — Claude consultation, docs/design/05) |
+| P6 | Gemini, ChatGPT, and Claude.ai adapters | Each has structured degradation handling | ✅ DONE — entry-driven adapters on BaseChatDriver (2026-08-08: 238f440, 4a4cd4d) — `ProviderDriver` schema + separate `entries/<p>.driver.json` merged at load (R1 closed), thin drivers, per-provider state-machine fixtures via jsdom harness, structured health surface (workingSignal/lastVerifiedAt/foundVia/confidence) = P6 gate; 99/99 unit tests; live-validated: gemini/chatgpt/claude PONG under the 8s window (opportunistic gate `test/integration/p6-live-gate.mjs`) |
 | P7 | Optional fanout, critique, routing, and debate | All features obey budgets and relay policy | ⬜ not started |
 | P8 | Observability and operational hardening | Drift, failures, and delivery state are diagnosable | 🟡 drift tooling exists (provider_verify/ADRs 0002-0003); hardening pending |
 
@@ -100,6 +100,13 @@ recorded as `completed_late` (both receipts coexist in the append-only trail).
 A poll-independent reaper (60s interval, 30 min hard TTL, `abandoned` receipt)
 bounds the registry even when a client never polls again. Default ask budget
 raised to 2 min (a UX knob, not a correctness control).
+
+Closed-tab escalation (2026-08-08, 343a1c6, user-reported hang): when the
+pooled session is dead (tab closed outside the bridge), `advanceAsk` escalates
+to a terminal `TAB_CLOSED` state (blocked receipt, entry removed) instead of
+treating poll failure as transient and watching a dead target forever — the
+state P4 reconciliation inherits as its surface-gone analogue (docs/design/05).
+Suite: 99/99.
 
 ## Discovery is hardened (2026-08-07)
 
