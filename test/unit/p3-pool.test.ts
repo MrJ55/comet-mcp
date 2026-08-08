@@ -49,18 +49,22 @@ test('P3 cap default is 5 (P0 measured safe limit)', () => {
 
 test('fix 2026-08-07: completion requires stability window, not two readings (Grok early-latch)', () => {
   const t0 = 1_000_000;
-  // two identical readings 2s apart must NOT complete (the old bug: latched 1592
-  // chars of a 10205-char Grok answer on a mid-stream pause)
-  const r1 = completionStability('hashA', 'hashA', null, t0);
-  assert.equal(r1.complete, false, 'first stable reading: not complete');
+  // NEW semantics (async-ask fix): the FIRST reading of a hash starts the clock
+  // (previously it was discarded — that cost an extra poll and falsely reported
+  // 'in progress' for an already-complete response).
+  const r1 = completionStability('hashA', null, null, t0);
+  assert.equal(r1.complete, false, 'first reading starts the clock, not complete yet');
+  assert.equal(r1.stableSince, t0, 'clock starts on the FIRST reading');
+  // still held the 8s window? only then complete
   const r2 = completionStability('hashA', 'hashA', r1.stableSince, t0 + 2000);
-  assert.equal(r2.complete, false, 'two readings 2s apart: NOT complete (old code returned here)');
+  assert.equal(r2.complete, false, '2s of stability is not enough');
+  assert.equal(r2.stableSince, t0, 'clock continues from the first reading');
   // hash changed mid-window → clock restarts
   const r3 = completionStability('hashB', 'hashA', r2.stableSince, t0 + 4000);
   assert.equal(r3.complete, false);
   assert.equal(r3.stableSince, null, 'hash change restarts the stability clock');
-  // stability held the full window → complete
-  const r4 = completionStability('hashB', 'hashB', null, t0 + 6000);
+  // stability held the full window from the first reading → complete
+  const r4 = completionStability('hashB', null, null, t0 + 6000);
   const r5 = completionStability('hashB', 'hashB', r4.stableSince, t0 + 6000 + MIN_COMPLETION_STABILITY_MS + 1);
   assert.equal(r5.complete, true, 'stable for the full window → complete');
 });

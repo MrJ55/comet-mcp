@@ -49,9 +49,11 @@ test('async ask: dispatch returns immediately (does not block), poll advances to
   assert.ok(isAskPending(dispatched.idempotencyKey), 'ask registered as pending');
   assert.equal(lastDispatchedFor('grok'), dispatched.idempotencyKey, 'provider poll can find it');
 
-  // advance once: stability window not yet held → still in progress
+  // advance once: clock starts on the FIRST completed reading but the 8s window
+  // has not held → still in progress (status should be 'confirming', not 'completed')
   const first = await advanceAsk(dispatched.idempotencyKey);
   assert.equal(first?.completed, false, 'one advance: not complete (stability window)');
+  assert.equal(first?.status, 'confirming', 'completed-but-confirming is reported as confirming, not leaking completed');
   assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending after one advance');
 
   // advance repeatedly (with real wall-clock waits) until the stability window holds

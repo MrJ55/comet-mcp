@@ -119,6 +119,14 @@ export function isCircuitOpen(targetId: string): boolean {
  * (observed: latched 1592 chars of a 10205-char answer). Completion now requires
  * the hash to be unchanged for MIN_COMPLETION_STABILITY_MS of wall-clock time.
  *
+ * FIX 2026-08-07 (async-ask): the clock previously started only on the SECOND
+ * identical reading (prevHash === hash), so a response already complete at poll #1
+ * needed 3 polls / ~34s to finalize, and the first 'completed' poll falsely
+ * reported 'in progress'. Now the clock starts on the FIRST reading of the new
+ * response (caller gates on sawNewResponse, so this IS new content), and holds
+ * for the full window. Anti-truncation is preserved: 8s of true stability is
+ * still required before completion.
+ *
  * @param stableSince epoch ms when the current hash first became stable (null = none)
  * @param now epoch ms
  * @returns complete=true only when stability held the window; stableSince is the
@@ -130,11 +138,12 @@ export function completionStability(
   stableSince: number | null,
   now: number,
 ): { complete: boolean; stableSince: number | null } {
-  const sameAsPrev = hash !== null && prevHash !== null && hash === prevHash;
+  const sameAsPrev = hash !== null && (prevHash === null || hash === prevHash);
   if (!sameAsPrev) {
+    // content changed between polls — restart the stability clock
     return { complete: false, stableSince: null };
   }
-  const since = stableSince ?? now;
+  const since = stableSince ?? now; // first reading of this hash starts the clock
   const held = now - since >= MIN_COMPLETION_STABILITY_MS;
   return { complete: held, stableSince: since };
 }
@@ -781,9 +790,15 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
     }
   }
   p.prevHash = hash;
+  // 2026-08-07 (async-ask bug): when the tab shows a COMPLETED response but the
+  // stability window is still confirming, report status='confirming' instead of
+  // leaking poll.state='completed' — the previous output said "Task in progress …
+  // Status: COMPLETED", which is contradictory and hid that the response was
+  // actually received. The client polls again; the next advance finalizes.
+  const confirming = poll.state === 'completed' && p.sawNewResponse;
   return {
     completed: false, response: '', markdown: null, steps: p.stepsCollected,
-    currentStep: poll.currentStep, status: poll.state,
+    currentStep: poll.currentStep, status: confirming ? 'confirming' : poll.state,
     agentBrowsingUrl: poll.agentBrowsingUrl, timedOut: false,
     correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
   };
