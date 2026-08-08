@@ -31,6 +31,8 @@ export type ReceiptStatus =
   | 'completed'    // response received and recorded
   | 'blocked'      // policy or provider refused before input (approval, size, plan, login)
   | 'timed_out'    // bounded deadline exceeded
+  | 'completed_late' // 2026-08-08: response recovered AFTER soft expiry (both receipts coexist — truthful)
+  | 'abandoned'    // 2026-08-08: hard TTL reached — reaper purged the ask, no completion
   | 'unknown';     // outcome uncertain — never silently retry
 
 /**

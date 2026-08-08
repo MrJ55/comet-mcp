@@ -6,6 +6,11 @@
  * Fix: dispatchAsk returns immediately; advanceAsk (driven by provider_poll)
  * advances one poll step and completes when the 8s stability window holds.
  *
+ * 2026-08-08 (four-opinion design): soft expiry is NON-destructive — a budget
+ * breach transitions the entry to 'watching' (retained) instead of deleting it,
+ * so a late CDP answer is still recovered and recorded as completed_late. The
+ * poll-independent reaper bounds the registry (HARD_TTL).
+ *
  * Run: node --test test/unit/async-ask.test.ts  (after npx tsc)
  */
 import assert from 'node:assert';
@@ -13,7 +18,9 @@ import { test } from 'node:test';
 import {
   dispatchAsk, advanceAsk, isAskPending, lastDispatchedFor,
   completionStability, MIN_COMPLETION_STABILITY_MS,
+  reapExpired, HARD_TTL_MS,
 } from '../../dist/drivers/index.js';
+import { eventsForCorrelation } from '../../dist/core/event-store.js';
 
 // fake driver: first poll (before-snapshot) is empty; subsequent polls return the
 // completed answer — so sawNewResponse becomes true, then the stability window holds.
@@ -83,4 +90,95 @@ test('completionStability: window must hold, not just two readings', () => {
   assert.equal(r2.complete, false, '2s of stability is not enough (old bug)');
   const r3 = completionStability('h', 'h', r2.stableSince, t0 + 2000 + MIN_COMPLETION_STABILITY_MS + 1);
   assert.equal(r3.complete, true, '8s window held → complete');
+});
+
+// ---------------------------------------------------------------------------
+// 2026-08-08: late reconciliation (four-opinion design)
+// ---------------------------------------------------------------------------
+
+/** Count delivery receipts / received events for a correlation (audit truth). */
+function receiptCounts(correlationId: string) {
+  const evs = eventsForCorrelation(correlationId);
+  const receipts = evs.filter((e) => e.type === 'delivery.receipt');
+  return {
+    timed_out: receipts.filter((r: any) => r.receiptStatus === 'timed_out').length,
+    completed: receipts.filter((r: any) => r.receiptStatus === 'completed').length,
+    completed_late: receipts.filter((r: any) => r.receiptStatus === 'completed_late').length,
+    abandoned: receipts.filter((r: any) => r.receiptStatus === 'abandoned').length,
+    received: evs.filter((e) => e.type === 'response.received').length,
+  };
+}
+
+test('2026-08-08: soft expiry — timed_out outcome, entry RETAINED (watching), single receipt', async () => {
+  const d = fakeDriver('partial answer...', 'streaming'); // stays streaming → no accidental finalize
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'PONG?', { timeoutMs: 0 });
+  const key = dispatched.idempotencyKey;
+
+  const first = await advanceAsk(key); // observes elapsed >= 1ms → soft transition
+  assert.equal(first?.completed, false);
+  assert.equal(first?.status, 'timed_out', 'transition poll reports the deadline once');
+  assert.equal(first?.timedOut, true);
+  assert.ok(isAskPending(key), 'entry RETAINED after soft expiry (was hard-deleted)');
+
+  // repeated polls: still watching, and the timed_out receipt fires exactly once
+  for (let i = 0; i < 4; i++) {
+    const r = await advanceAsk(key);
+    assert.equal(r?.status, 'watching', 'distinct watching status on later polls');
+    assert.ok(isAskPending(key), 'still pending while watching');
+  }
+  const counts = receiptCounts(dispatched.correlationId);
+  assert.equal(counts.timed_out, 1, 'timed_out receipt fires exactly once (no duplicate audit rows)');
+});
+
+test('2026-08-08: late recovery — completed_late after soft expiry, both receipts coexist', async () => {
+  const d = fakeDriver('A real answer worth reading.');
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'PONG?', { timeoutMs: 0 });
+  const key = dispatched.idempotencyKey;
+  await advanceAsk(key); // soft transition (tab already shows the answer → confirming)
+
+  let outcome = null;
+  for (let i = 0; i < 25 && isAskPending(key); i++) {
+    await new Promise((r) => setTimeout(r, 450)); // 8s stability window needs ~18 steps
+    outcome = await advanceAsk(key);
+    if (outcome?.completed) break;
+  }
+  assert.equal(outcome?.completed, true, 'completed after the stability window');
+  assert.equal(outcome?.late, true, 'flagged as recovered after soft expiry');
+  assert.equal(outcome?.response, 'A real answer worth reading.');
+  const counts = receiptCounts(dispatched.correlationId);
+  assert.equal(counts.timed_out, 1, 'timed_out receipt kept (truthful)')
+  assert.equal(counts.completed_late, 1, 'completed_late receipt recorded');
+  assert.equal(counts.completed, 0, 'no plain completed receipt for a late recovery');
+  assert.equal(counts.received, 1, 'response.received recorded — durable linkage survived soft expiry');
+  assert.ok(!isAskPending(key), 'finalized after late recovery');
+});
+
+test('2026-08-08: watching — soft-expired ask still streaming reports WATCHING, never completed', async () => {
+  const d = fakeDriver('partial answer...', 'streaming');
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'PONG?', { timeoutMs: 0 });
+  const key = dispatched.idempotencyKey;
+  const first = await advanceAsk(key);
+  assert.equal(first?.status, 'timed_out', 'transition poll reports the deadline');
+  const second = await advanceAsk(key);
+  assert.equal(second?.status, 'watching', 'distinct watching status while streaming');
+  assert.equal(second?.completed, false);
+  assert.ok(isAskPending(key), 'kept watching');
+});
+
+test('2026-08-08: reaper — purges entries past HARD_TTL regardless of polling, abandoned receipt', async () => {
+  const d = fakeDriver('A real answer worth reading.');
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'PONG?', { timeoutMs: 0 });
+  const key = dispatched.idempotencyKey;
+  await advanceAsk(key); // → watching
+  assert.ok(isAskPending(key));
+
+  // inject the clock 31 min ahead: the reaper sweep must purge WITHOUT any poll
+  const purged = reapExpired(Date.now() + HARD_TTL_MS + 1000);
+  assert.ok(purged >= 1, `reaper purged ${purged} abandoned entr(ies)`);
+  assert.ok(!isAskPending(key), 'purged entry no longer pending');
+  assert.equal(receiptCounts(dispatched.correlationId).abandoned, 1, 'abandoned receipt recorded');
 });

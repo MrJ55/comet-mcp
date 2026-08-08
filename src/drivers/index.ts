@@ -250,6 +250,8 @@ export interface AskOutcome {
   idempotencyKey?: string;
   /** P3 reconnect-dedup: true when content was already recorded (no new response event). */
   deduped?: boolean;
+  /** P6/2026-08-08: true when the outcome was recovered after the ask budget expired (soft expiry → watching). */
+  late?: boolean;
 }
 
 /** Normalize prompt — convert markdown/bullets to natural text (preserves comet_ask behavior). */
@@ -614,10 +616,22 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
   return timedOut;
 }
 
-/** Render the "still in progress" view (preserves comet_ask's message shape). */
+/** Render the "still in progress" view (preserves comet_ask's message shape).
+ * 2026-08-08 (four-opinion design): honest states — 'timed_out' is a SOFT expiry
+ * (the ask is still watched and recoverable), 'watching' means the client
+ * deadline passed but the tab keeps running, 'abandoned' is the hard-TTL end. */
 export function renderInProgress(outcome: AskOutcome, useCometNames = false): string {
   const stop = useCometNames ? 'comet_stop' : 'provider_stop';
   const poll = useCometNames ? 'comet_poll' : 'provider_poll';
+  if (outcome.status === 'timed_out') {
+    return `Ask deadline expired — soft expiry, still watching the tab for a late completion.\nStatus: TIMED_OUT (watching)\n\nUse ${poll} again to recover the answer if it lands late, or ${stop} to cancel.`;
+  }
+  if (outcome.status === 'watching') {
+    return `Client poll deadline reached — background task still running. Retrying poll…\nStatus: WATCHING\n\nUse ${poll} to retry, or ${stop} to cancel.`;
+  }
+  if (outcome.status === 'abandoned') {
+    return `Ask abandoned — hard TTL (${Math.round(HARD_TTL_MS / 60000)} min) reached without completion.\nStatus: ABANDONED`;
+  }
   let msg = `Task in progress (${outcome.steps.length} steps so far).\n`;
   msg += `Status: ${outcome.status.toUpperCase()}\n`;
   if (outcome.currentStep) msg += `Current: ${outcome.currentStep}\n`;
@@ -651,12 +665,25 @@ interface PendingAsk {
   beforeLen: number;
   startTime: number;
   timeoutMs: number;
+  /** 2026-08-08 (late reconciliation): 'active' until the ask budget expires, then 'watching'.
+   * Expiry is NON-destructive — the key stays so a late CDP answer can be reunited. */
+  phase: 'active' | 'watching';
   stepsCollected: string[];
   sawNewResponse: boolean;
   last: PollResult | null;
   prevHash: string | null;
   stableSince: number | null;
 }
+
+/**
+ * Hard-TTL bound for the pending-ask registry (2026-08-08, Claude/Grok design):
+ * the reaper purges entries older than this regardless of client polling — sized
+ * against the longest realistic generation (Perplexity research, multi-step
+ * agents) plus margin (Grok sizing guidance; 30 min reasonable start).
+ */
+export const HARD_TTL_MS = 30 * 60 * 1000;
+/** Reaper cadence — wall-clock sweep, independent of any client ever polling again. */
+export const REAPER_INTERVAL_MS = 60 * 1000;
 
 const pendingAsks = new Map<string, PendingAsk>();
 
@@ -704,7 +731,11 @@ export async function dispatchAsk(
     driver, session, prompt, envelope,
     beforeHash, beforeLen,
     startTime: Date.now(),
-    timeoutMs: opts.timeoutMs ?? 15000,
+    // 2026-08-08: default ask budget is a CLIENT-VISIBLE UX knob (when the client
+    // first sees a deadline) — correctness lives in the non-destructive expiry
+    // (advanceAsk soft-transition), not in this number.
+    timeoutMs: opts.timeoutMs ?? 120000,
+    phase: 'active',
     stepsCollected: [], sawNewResponse: false,
     last: null, prevHash: null, stableSince: null,
   });
@@ -715,8 +746,10 @@ export async function dispatchAsk(
 /**
  * Advance a dispatched ask by ONE poll step (called from provider_poll).
  * Returns the AskOutcome: completed (response stored + receipt recorded) when the
- * stability window holds; timedOut when the ask budget expires; otherwise the
- * in-progress view. The pending entry is removed on completion/timeout.
+ * stability window holds; timedOut when the ask budget expires (SOFT expiry — the
+ * entry stays 'watching' so a late CDP answer can still be recovered and recorded
+ * as completed_late, 2026-08-08 four-opinion design); otherwise the in-progress
+ * view. The pending entry is removed on completion or by the reaper (hard TTL).
  */
 export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   const p = pendingAsks.get(key);
@@ -724,8 +757,13 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   const { driver, session, envelope } = p;
   const targetId = session.targetId;
 
-  if (Date.now() - p.startTime >= p.timeoutMs) {
-    pendingAsks.delete(key);
+  // One-shot soft-expiry transition (Claude/Grok: fire timed_out EXACTLY once —
+  // the elapsed >= timeoutMs check would otherwise re-fire on every later poll).
+  // Non-destructive: the key is retained in 'watching' for late recovery.
+  let justExpired = false;
+  if (p.phase === 'active' && Date.now() - p.startTime >= p.timeoutMs) {
+    p.phase = 'watching';
+    justExpired = true;
     recordSendEvent({ ...envelope, content: p.prompt }, 'send.timed_out');
     recordDeliveryReceipt({
       receiptId: `rct-${Date.now().toString(36)}`,
@@ -734,9 +772,23 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
       idempotencyKey: envelope.idempotencyKey,
       status: 'timed_out', recordedAt: new Date().toISOString(), attempt: 1,
     });
+  }
+
+  // Watchdog guard: a watching entry past the hard TTL is dead — the reaper
+  // sweeps these on a wall clock; guard here so a very-late poll cannot finalize.
+  if (p.phase === 'watching' && Date.now() - p.startTime >= HARD_TTL_MS) {
+    pendingAsks.delete(key);
+    recordDeliveryReceipt({
+      receiptId: `rct-${Date.now().toString(36)}`,
+      envelopeId: envelope.idempotencyKey,
+      correlationId: envelope.correlationId,
+      idempotencyKey: envelope.idempotencyKey,
+      status: 'abandoned', recordedAt: new Date().toISOString(), attempt: 1,
+      details: 'hard TTL reached without completion',
+    });
     return {
       completed: false, response: '', markdown: null, steps: p.stepsCollected,
-      currentStep: p.last?.currentStep ?? '', status: p.last?.state ?? 'timed_out',
+      currentStep: '', status: 'abandoned',
       agentBrowsingUrl: '', timedOut: true,
       correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
     };
@@ -763,6 +815,7 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
     p.stableSince = stableSince;
     if (complete) {
       pendingAsks.delete(key);
+      const wasLate = p.phase === 'watching';
       const outcome: AskOutcome = {
         completed: true,
         response: poll.response || 'Task completed (no response text extracted)',
@@ -772,10 +825,12 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
         status: poll.state,
         agentBrowsingUrl: poll.agentBrowsingUrl,
         timedOut: false,
+        late: wasLate,
         correlationId: envelope.correlationId,
         idempotencyKey: envelope.idempotencyKey,
       };
-      // durable: response.received (+ cursor checkpoint) → delivery.receipt completed
+      // durable: response.received (+ cursor checkpoint) → delivery.receipt
+      // completed (normal) or completed_late (recovered after soft expiry)
       const alreadyRecorded = hasResponseHash(envelope.correlationId, hash);
       const responseEv = alreadyRecorded
         ? recordResponseDeduplicated({ ...envelope, content: p.prompt }, driver.provider, {
@@ -789,9 +844,9 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
       recordDeliveryReceipt({
         receiptId: `rct-${responseEv.seq}`, envelopeId: envelope.idempotencyKey,
         correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
-        status: 'completed', recordedAt: new Date().toISOString(), attempt: 1,
+        status: wasLate ? 'completed_late' : 'completed', recordedAt: new Date().toISOString(), attempt: 1,
         contentHash: hash, providerMessageId: poll.messageId, cursor: poll.cursor ?? hash,
-        details: alreadyRecorded ? 'reconnect-dedup: content already recorded for this correlation' : undefined,
+        details: alreadyRecorded ? 'reconnect-dedup: content already recorded for this correlation' : (wasLate ? 'recovered after soft expiry' : undefined),
       });
       return alreadyRecorded ? { ...outcome, deduped: true } : outcome;
     }
@@ -802,13 +857,54 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   // leaking poll.state='completed' — the previous output said "Task in progress …
   // Status: COMPLETED", which is contradictory and hid that the response was
   // actually received. The client polls again; the next advance finalizes.
+  // 2026-08-08: after soft expiry, a non-complete advance reports 'watching' — a
+  // genuinely distinct status so the render layer can be honest (Claude/Grok).
   const confirming = poll.state === 'completed' && p.sawNewResponse;
   return {
     completed: false, response: '', markdown: null, steps: p.stepsCollected,
-    currentStep: poll.currentStep, status: confirming ? 'confirming' : poll.state,
-    agentBrowsingUrl: poll.agentBrowsingUrl, timedOut: false,
+    currentStep: poll.currentStep,
+    // The transition poll reports the deadline itself (once); later watching
+    // polls report the distinct 'watching' status (Claude/Grok honest render).
+    status: justExpired && !confirming ? 'timed_out'
+      : confirming ? 'confirming'
+      : (p.phase === 'watching' ? 'watching' : poll.state),
+    agentBrowsingUrl: poll.agentBrowsingUrl, timedOut: justExpired,
     correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
   };
+}
+
+/**
+ * Reaper sweep body (2026-08-08, Claude/Grok design): purge entries past
+ * HARD_TTL_MS and record an 'abandoned' receipt — runs on a wall clock, NOT on
+ * client polling (an abandoned ask is by definition never polled again).
+ * `now` is injectable for tests. Returns the number of entries purged.
+ */
+export function reapExpired(now: number = Date.now()): number {
+  let purged = 0;
+  for (const [key, p] of pendingAsks) {
+    if (now - p.startTime >= HARD_TTL_MS) {
+      pendingAsks.delete(key);
+      recordDeliveryReceipt({
+        receiptId: `rct-${Date.now().toString(36)}`,
+        envelopeId: p.envelope.idempotencyKey,
+        correlationId: p.envelope.correlationId,
+        idempotencyKey: p.envelope.idempotencyKey,
+        status: 'abandoned', recordedAt: new Date().toISOString(), attempt: 1,
+        details: 'abandoned by reaper (hard TTL)',
+      });
+      purged++;
+    }
+  }
+  return purged;
+}
+
+let reaperStarted = false;
+/** Start the poll-independent reaper interval (idempotent). unref'd so tests/CLI can exit. */
+export function startReaper(): void {
+  if (reaperStarted) return;
+  reaperStarted = true;
+  const timer = setInterval(() => { reapExpired(); }, REAPER_INTERVAL_MS);
+  if (typeof (timer as any).unref === 'function') (timer as any).unref();
 }
 
 /** True when a dispatched ask is still pending for this key. */

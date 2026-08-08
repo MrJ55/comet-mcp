@@ -8,4 +8,5 @@ Create one short decision record per material choice, such as the concurrency ce
 - [0004: Markdown extraction strategy and provider dispatcher](0004-markdown-extraction-and-provider-dispatcher.md) — accepted 2026-08-07
 - [0005: Async ask dispatch — provider_ask survives the gateway RPC window](0005-async-ask-dispatch-gateway-rpc-survival.md) — accepted 2026-08-07
 - [0006: Provider driver contract in entries (separate `.driver.json` files)](0006-provider-driver-contract-in-entries.md) — accepted 2026-08-08
+- [0007: Async-ask late reconciliation (soft expiry + poll-independent reaper)](0007-async-ask-late-reconciliation.md) — accepted 2026-08-08
 

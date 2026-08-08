@@ -84,7 +84,7 @@ provider_list / provider_close / provider_health / provider_override`, plus
 `provider_ask/poll/stop` accept `tabId`. `comet_connect` no longer destroys
 tabs. Live-verified through pi: pool 5/5 with real provider tabs.
 
-## Async ask dispatch (2026-08-07, c206970)
+## Async ask dispatch (2026-08-07, c206970; late reconciliation 2026-08-08)
 
 Long provider asks survive the pi gateway RPC window: `provider_ask` dispatches
 fire-and-forget and returns `{status:"in_progress", correlationId,
@@ -92,6 +92,14 @@ idempotencyKey}` immediately; `provider_poll` advances the ask server-side
 (8s completion-stability window, per-tab backoff, dedup, delivery receipt);
 `provider_response` fetches the stored full response in chunks. Fixes the
 previous -32001 gateway timeout that stranded prompts mid-submit.
+
+2026-08-08 (ADR 0007, four-opinion design — Gemini/Claude/Grok): ask expiry is
+SOFT and non-destructive — a budget breach transitions the ask to `watching`
+(retained) instead of deleting it, so a late CDP answer is recovered and
+recorded as `completed_late` (both receipts coexist in the append-only trail).
+A poll-independent reaper (60s interval, 30 min hard TTL, `abandoned` receipt)
+bounds the registry even when a client never polls again. Default ask budget
+raised to 2 min (a UX knob, not a correctness control).
 
 ## Discovery is hardened (2026-08-07)
 
