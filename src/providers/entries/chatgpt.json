@@ -7,12 +7,13 @@
   "confidence": "high",
   "controls": {
     "composer": {
-      "selector": "[aria-label=\"Chat with ChatGPT\"]",
-      "tag": "textarea",
+      "selector": "[aria-label=\"Chat with ChatGPT\"][contenteditable=\"true\"]",
+      "tag": "div",
       "aria": "Chat with ChatGPT",
       "placeholder": "Ask anything",
       "name": "prompt-textarea",
       "classes": [
+        "ProseMirror",
         "wcDTda_fallbackTextarea"
       ],
       "snippet": "",

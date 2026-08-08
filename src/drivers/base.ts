@@ -302,17 +302,25 @@ export abstract class BaseChatDriver implements ChatDriver {
     };
 
     const clickButton = async (): Promise<boolean> => {
-      await new Promise((r) => setTimeout(r, 600)); // conditional send buttons render after typing
-      const sendSel = await this.resolveControl(handle, 'sendButton', true);
-      if (!sendSel) return false;
-      const clicked = await this.evalValue(handle, `(() => {
-        const b = document.querySelector(${JSON.stringify(sendSel)});
-        if (!b || b.disabled) return false;
-        b.click(); return true;
-      })()`);
-      if (clicked !== true) return false;
-      await new Promise((r) => setTimeout(r, 700));
-      return verifyFn();
+      // Conditional send buttons render after typing with latency (live-verified:
+      // claude /new needed ~2s post-open + the button appears after text lands).
+      // Retry resolve+click so a slow render doesn't strand the ask.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await new Promise((r) => setTimeout(r, attempt === 0 ? 600 : 800));
+        const sendSel = await this.resolveControl(handle, 'sendButton', true);
+        if (sendSel) {
+          const clicked = await this.evalValue(handle, `(() => {
+            const b = document.querySelector(${JSON.stringify(sendSel)});
+            if (!b || b.disabled) return false;
+            b.click(); return true;
+          })()`);
+          if (clicked === true) {
+            await new Promise((r) => setTimeout(r, 700));
+            if (await verifyFn()) return true;
+          }
+        }
+      }
+      return false;
     };
 
     if (method === 'click') {

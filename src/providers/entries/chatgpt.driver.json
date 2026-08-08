@@ -1,5 +1,5 @@
 {
-  "typing": "value-input",
+  "typing": "insertText",
   "submit": {
     "method": "click",
     "verify": "composer-emptied",
