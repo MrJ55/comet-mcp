@@ -171,3 +171,88 @@ test('amended: NOT a same-prefix superset → returns null (genuinely new turn, 
   });
   assert.equal(notAmended, null, 'non-superset is NOT an amendment');
 });
+
+// ---------------------------------------------------------------------------
+// ADR 0010 — sentinel completion marker
+// ---------------------------------------------------------------------------
+
+function sentinelDriver(answer: string, comply = true) {
+  const calls = { asked: [], polls: 0 };
+  // the driver echoes the sentinel from the WRAPPED prompt so the response ends
+  // with the SAME sentinel dispatchAsk generated (compliance simulation);
+  // comply=false → the model ignores the instruction (no sentinel)
+  const echoedAnswer = (prompt: string) => {
+    const m = prompt.match(/exact string (\S+)/);
+    return comply && m ? answer + '\n\n' + m[1] : answer;
+  };
+  return {
+    provider: 'gemini',
+    open: async () => ({ provider: 'gemini', tabId: 't', targetId: 't', cdpSessionId: 'ws://x', openedAt: '', state: 'connected' }),
+    ask: async (_s: any, prompt: string) => { calls.asked.push(prompt); return { receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'sent' as const, recordedAt: '' } }; },
+    poll: async () => {
+      calls.polls++;
+      if (calls.polls === 1) return { state: 'idle', steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+      const wrapped = calls.asked[0] ?? '';
+      return { state: 'completed', steps: [], currentStep: '', response: echoedAnswer(wrapped), markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+    },
+    stop: async () => true,
+    reset: async () => {},
+    health: async () => ({ provider: 'gemini', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),
+    _calls: calls,
+  } as any;
+}
+
+test('ADR 0010: withSentinelInstruction wraps the prompt + generateSentinel is random', async () => {
+  const { withSentinelInstruction, generateSentinel } = await import('../../dist/drivers/index.js');
+  const s = generateSentinel();
+  assert.equal(s.length, 10);
+  const wrapped = withSentinelInstruction('What is X?', s);
+  assert.ok(wrapped.includes(s));
+  assert.ok(wrapped.includes('end your response with the exact string'));
+  assert.notEqual(generateSentinel(), generateSentinel(), 'per-ask random');
+});
+
+test('ADR 0010: stripSentinel removes a terminal sentinel (own line) + trailing ws', async () => {
+  const { stripSentinel } = await import('../../dist/drivers/index.js');
+  const r = stripSentinel('The answer.\n\nZz9Xq2Gm\n', 'Zz9Xq2Gm');
+  assert.equal(r.found, true);
+  assert.equal(r.text, 'The answer.');
+  // sentinel mid-string (NOT terminal) → untouched
+  const n = stripSentinel('Zz9Xq2Gm mid sentence, more text', 'Zz9Xq2Gm');
+  assert.equal(n.found, false);
+  assert.equal(n.text, 'Zz9Xq2Gm mid sentence, more text');
+});
+
+test('ADR 0010: completionMarker ask — sentinel present → finalizes on FIRST completed poll, sentinel stripped from stored response', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advanceAsk, isAskPending } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  const d = sentinelDriver('A complete answer.');  // driver echoes the dispatch-generated sentinel
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  // the driver was asked the WRAPPED prompt (with the sentinel instruction)
+  assert.ok(d._calls.asked[0].includes('end your response with the exact string'), 'prompt wrapped');
+  const outcome = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(outcome?.completed, true, 'sentinel ⇒ authoritative ⇒ completes on first completed poll (no 8s window)');
+  assert.equal(outcome?.response, 'A complete answer.', 'sentinel stripped from the surfaced response');
+  // the sentinel (from the wrapped prompt) must not leak into the response
+  const wrappedPrompt = d._calls.asked[0] ?? '';
+  const sentinelInPrompt = wrappedPrompt.match(/exact string (\S+)/)?.[1] ?? '';
+  assert.ok(sentinelInPrompt.length > 0, 'sentinel present in wrapped prompt');
+  assert.ok(!outcome?.response.includes(sentinelInPrompt), 'no sentinel leak');
+  assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
+});
+
+test('ADR 0010: non-compliant model (no sentinel) → falls back to normal stability path (not falsely finalized)', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advanceAsk, isAskPending } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  const d = sentinelDriver('Plain answer without the marker', false);
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  // no sentinel ⇒ NOT authoritative ⇒ the stability window still applies — the
+  // first completed poll starts the clock but does NOT finalize early.
+  const first = await advanceAsk(dispatched.idempotencyKey);
+  assert.ok(first && !first.completed, 'no sentinel → not falsely completed (stability window holds)');
+  assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending (fallback path, not finalized)');
+});

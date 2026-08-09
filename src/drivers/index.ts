@@ -321,6 +321,49 @@ export function simpleHash(s: string): string {
   return h.toString(16);
 }
 
+// ---------------------------------------------------------------------------
+// ADR 0010 — sentinel completion marker
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a random per-ask sentinel (collision-proof for prose). Mixed-case
+ * alphanumeric, ~10 chars — effectively impossible for the model to emit
+ * accidentally, unique per ask so no cross-turn ambiguity.
+ */
+export function generateSentinel(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'; // no 0/O/1/l/I
+  let s = '';
+  for (let i = 0; i < 10; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+/**
+ * Append the sentinel instruction to a prompt (ADR 0010). The instruction is a
+ * technical directive the model complies with by ending its response with the
+ * exact string — verified live on gemini/chatgpt/claude (2026-08-09).
+ */
+export function withSentinelInstruction(prompt: string, sentinel: string): string {
+  return `${prompt}\n\n(Technical: end your response with the exact string ${sentinel} — nothing after it.)`;
+}
+
+/**
+ * Strip a sentinel from the END of a response, if present (ADR 0010). Returns
+ * the cleaned text and whether the sentinel was found. Handles the model
+ * placing the sentinel on its own line and trailing whitespace/newlines after
+ * it (verified live: "…answer.\n\n<sentinel>"). The sentinel must be stripped
+ * BEFORE hashing/persistence/relay so stored content is clean.
+ */
+export function stripSentinel(text: string, sentinel: string): { text: string; found: boolean } {
+  if (!sentinel) return { text, found: false };
+  const trimmed = text.trimEnd();
+  if (trimmed.endsWith(sentinel)) {
+    // remove the sentinel + any newlines immediately before it (its own line)
+    const without = trimmed.slice(0, -sentinel.length).replace(/\n+$/, '');
+    return { text: without, found: true };
+  }
+  return { text, found: false };
+}
+
 /** Clean up expired + over-count responses on startup and after each write. */
 export function enforceRetention(): number {
   const now = Date.now();
@@ -700,6 +743,13 @@ interface PendingAsk {
   last: PollResult | null;
   prevHash: string | null;
   stableSince: number | null;
+  /**
+   * ADR 0010 (sentinel completion marker): when set, the prompt asked the model
+   * to end its response with this exact random string. Its presence at the end
+   * of a completed poll ⇒ authoritative completion (hash-confirmed, timer-free).
+   * Absent (non-compliant model) ⇒ falls back to the provider's heuristic/weak.
+   */
+  sentinel?: string;
 }
 
 /**
@@ -736,7 +786,7 @@ export async function dispatchAsk(
   driver: ChatDriver,
   session: TabSession,
   prompt: string,
-  opts: { idempotencyKey?: string; timeoutMs?: number } = {},
+  opts: { idempotencyKey?: string; timeoutMs?: number; completionMarker?: boolean } = {},
 ): Promise<{ correlationId: string; idempotencyKey: string; status: string; replayed?: boolean }> {
   const envelope = makeEnvelope(driver.provider, opts.idempotencyKey);
   const replayed = opts.idempotencyKey ? replayOutcomeIfRecorded(opts.idempotencyKey) : null;
@@ -744,18 +794,23 @@ export async function dispatchAsk(
     return { correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey, status: 'completed', replayed: true };
   }
 
+  // ADR 0010: optional sentinel completion marker — append the instruction and
+  // carry the sentinel on the pending entry. Absent ⇒ normal heuristic/weak path.
+  const sentinel = opts.completionMarker ? generateSentinel() : undefined;
+  const wirePrompt = sentinel ? withSentinelInstruction(prompt, sentinel) : prompt;
+
   // durable lifecycle: envelope.created → send.queued → snapshot → ask → accepted
-  recordEnvelopeCreated({ ...envelope, content: prompt });
-  recordSendEvent({ ...envelope, content: prompt }, 'send.queued');
+  recordEnvelopeCreated({ ...envelope, content: wirePrompt });
+  recordSendEvent({ ...envelope, content: wirePrompt }, 'send.queued');
   const before = await driver.poll(session);
   updateSessionAnchors(session, before);
   const beforeHash = before.contentHash ?? simpleHash(before.response);
   const beforeLen = before.response.length;
-  const askReceipt = await driver.ask(session, prompt);
-  recordSendEvent({ ...envelope, content: prompt }, askReceipt.receipt.status === 'sent' ? 'send.accepted' : 'send.unknown');
+  const askReceipt = await driver.ask(session, wirePrompt);
+  recordSendEvent({ ...envelope, content: wirePrompt }, askReceipt.receipt.status === 'sent' ? 'send.accepted' : 'send.unknown');
 
   pendingAsks.set(askKey(envelope), {
-    driver, session, prompt, envelope,
+    driver, session, prompt: wirePrompt, envelope,
     beforeHash, beforeLen,
     startTime: Date.now(),
     // 2026-08-08: default ask budget is a CLIENT-VISIBLE UX knob (when the client
@@ -765,6 +820,7 @@ export async function dispatchAsk(
     phase: 'active',
     stepsCollected: [], sawNewResponse: false,
     last: null, prevHash: null, stableSince: null,
+    sentinel,
   });
   lastDispatched.set(driver.provider, askKey(envelope));
   return { correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey, status: 'in_progress' };
@@ -856,7 +912,20 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   }
   p.last = poll;
   for (const step of poll.steps) if (!p.stepsCollected.includes(step)) p.stepsCollected.push(step);
-  const hash = poll.contentHash ?? simpleHash(poll.response);
+  // ADR 0010 sentinel marker: if the model ended with the per-ask sentinel, the
+  // response is AUTHORITATIVELY complete — strip the sentinel BEFORE hashing so
+  // stored content/hash/relay are clean, and mark confidence authoritative so
+  // the gate is hash-confirmed + timer-free. Non-compliant model (no sentinel)
+  // → unchanged fallback (provider heuristic/weak).
+  if (p.sentinel) {
+    const stripped = stripSentinel(poll.response, p.sentinel);
+    if (stripped.found) {
+      poll = { ...poll, response: stripped.text, completionConfidence: 'authoritative' };
+    }
+  }
+  // recompute the hash from the (possibly sentinel-stripped) response so the
+  // durable contentHash always matches the stored text
+  const hash = simpleHash(poll.response);
   if (poll.response.length > 0 && (hash !== p.beforeHash || poll.response.length > p.beforeLen)) {
     p.sawNewResponse = true;
   }

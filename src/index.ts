@@ -185,7 +185,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "provider_ask",
-    description: "Send a prompt to any provider (perplexity, grok, ...) and wait for the complete response. Provider-neutral: dispatches to the registered ChatDriver. Returns text + markdown. Pass the same idempotencyKey to retry without duplicating the send (P1 Half 2 replay safety).",
+    description: "Send a prompt to any provider (perplexity, grok, ...) and wait for the complete response. Provider-neutral: dispatches to the registered ChatDriver. Returns text + markdown. Pass the same idempotencyKey to retry without duplicating the send (P1 Half 2 replay safety). Set completionMarker=true (ADR 0010) to ask the model to end with a random sentinel — its presence finalizes completion authoritatively (timer-free) on gemini/chatgpt/claude; non-compliant models fall back to the normal stability window.",
     inputSchema: {
       type: "object",
       properties: {
@@ -194,6 +194,7 @@ const TOOLS: Tool[] = [
         timeout: { type: "number", description: "Max wait time in ms (default: 15000)" },
         tabId: { type: "string", description: "Specific tabId to ask in (optional â€” defaults to the provider's registered tab)" },
         idempotencyKey: { type: "string", description: "Replay-safe key: re-sending with the same key returns the prior outcome, never a duplicate send (optional)" },
+        completionMarker: { type: "boolean", description: "ADR 0010: ask the model to end with a random sentinel → authoritative completion when present (default: false)" },
       },
       required: ["provider", "prompt"],
     },
@@ -388,7 +389,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const session = tabId ? (tabRegistry.get(tabId) ?? await openTab(provider)) : await openTab(provider);
         if (!session) return { content: [{ type: "text", text: `no registered tab: ${tabId} â€” use provider_open first` }], isError: true };
         try {
-          const dispatched = await dispatchAsk(driver, session, prompt, { idempotencyKey, timeoutMs: timeout });
+          const dispatched = await dispatchAsk(driver, session, prompt, {
+            idempotencyKey,
+            timeoutMs: timeout,
+            completionMarker: args?.completionMarker === true, // ADR 0010 sentinel
+          });
           if (dispatched.replayed) {
             const { eventsForCorrelation } = await import('./core/event-store.js');
             const evs = eventsForCorrelation(dispatched.correlationId);
