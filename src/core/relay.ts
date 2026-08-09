@@ -15,10 +15,17 @@
  * yields the same approval hash.
  */
 
-import type { ContentPersistenceMode, ConversationEnvelope, ProviderId, RelayControls } from '../types/conversation.js';
+import type { ContentPersistenceMode, ConversationEnvelope, ConversationEvent, ProviderId, RelayControls } from '../types/conversation.js';
 import { computeEnvelopeHash, canonicalizeEnvelope } from './envelope.js';
 import { evaluateRelayPolicy, type RelayPolicyEvaluation } from './relay-policy.js';
-import { eventsForCorrelation, receiptsForCorrelation, recordEnvelopeCreated } from './event-store.js';
+import {
+  eventsForCorrelation,
+  receiptsForCorrelation,
+  recordEnvelopeCreated,
+  recordRelayApproval,
+  getRelayApproval,
+  consumeRelayApproval,
+} from './event-store.js';
 
 /** A relay source: the terminal-success provider response being relayed. */
 export interface RelaySource {
@@ -184,4 +191,90 @@ export function prepareRelay(input: RelayPrepareInput): RelayPrepareResult | Rel
     approvalRequired: envelope.relay.mode === 'approval-required',
     evaluation,
   };
+}
+
+// ---------------------------------------------------------------------------
+// P4 R5 — relay_approve / relay_reject (single-use, append-only)
+// ---------------------------------------------------------------------------
+
+/** Inputs to relay_approve / relay_reject (R5). */
+export interface RelayApprovalInput {
+  /** The envelopeHash returned by relay_prepare — what is being approved. */
+  approvalHash: string;
+  correlationId: string;
+  /** The prepared envelope's idempotencyKey (audit trail), when known. */
+  envelopeId?: string;
+  /** ISO expiry — defaults to +5min from now (matches prepare's default budget). */
+  expiresAt?: string;
+}
+
+export interface RelayApprovalResult {
+  ok: boolean;
+  status: 'approved' | 'rejected' | 'already_recorded' | 'error';
+  error?: string;
+  /** The append-only event row, when recorded. */
+  event?: ConversationEvent;
+  expiresAt?: string;
+}
+
+const APPROVAL_TTL_MS = 5 * 60 * 1000; // 5 min default — same as prepare's default budget
+
+/**
+ * R5: approve a prepared relay. Records relay.approved (append-only, keyed by
+ * approvalHash) with an expiry. Single-use is enforced at CONSUME time (CAS in
+ * consumeRelayApproval) — recording is idempotent-first: a hash is recorded
+ * once; re-approving the same hash returns already_recorded without mutation.
+ */
+export function approveRelay(input: RelayApprovalInput): RelayApprovalResult {
+  const expiresAt = input.expiresAt ?? new Date(Date.now() + APPROVAL_TTL_MS).toISOString();
+  const ev = recordRelayApproval({
+    approvalHash: input.approvalHash,
+    correlationId: input.correlationId,
+    envelopeId: input.envelopeId,
+    approved: true,
+    expiresAt,
+  });
+  if (!ev) {
+    const existing = getRelayApproval(input.approvalHash);
+    return {
+      ok: false,
+      status: 'already_recorded',
+      error: `approvalHash ${input.approvalHash} was already ${existing?.type === 'relay.approved' ? 'approved' : 'rejected'} (single-use)`,
+    };
+  }
+  return { ok: true, status: 'approved', event: ev, expiresAt };
+}
+
+/**
+ * R5: reject a prepared relay — records relay.rejected (append-only, terminal;
+ * no expiry — a rejection can never be consumed). Same single-record rule.
+ */
+export function rejectRelay(input: RelayApprovalInput): RelayApprovalResult {
+  const ev = recordRelayApproval({
+    approvalHash: input.approvalHash,
+    correlationId: input.correlationId,
+    envelopeId: input.envelopeId,
+    approved: false,
+  });
+  if (!ev) {
+    const existing = getRelayApproval(input.approvalHash);
+    return {
+      ok: false,
+      status: 'already_recorded',
+      error: `approvalHash ${input.approvalHash} was already ${existing?.type === 'relay.approved' ? 'approved' : 'rejected'} (single-use)`,
+    };
+  }
+  return { ok: true, status: 'rejected', event: ev };
+}
+
+/**
+ * R5/R6 bridge: the single-use CAS consume relay_send performs BEFORE touching
+ * the destination. Exposed here so relay_send (R6) and tests share one path.
+ */
+export function casConsumeApproval(
+  approvalHash: string,
+  correlationId: string,
+  envelopeId?: string,
+): { ok: true; event: ConversationEvent } | { ok: false; reason: string } {
+  return consumeRelayApproval(approvalHash, correlationId, envelopeId);
 }

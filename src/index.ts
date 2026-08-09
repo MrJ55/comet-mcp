@@ -253,6 +253,21 @@ const TOOLS: Tool[] = [
       required: ["sourceCorrelationId", "destination"],
     },
   },
+  {
+    name: "relay_approve",
+    description: "P4: approve (or reject) a prepared relay by its approvalHash. Records relay.approved/relay.rejected append-only with an expiry (default +5min). Single-use: a hash records once; consumption is CAS-enforced at relay_send. Pass approved=false to reject.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        approvalHash: { type: "string", description: "The approvalHash returned by relay_prepare" },
+        correlationId: { type: "string", description: "The relay chain correlationId (from relay_prepare)" },
+        envelopeId: { type: "string", description: "The prepared envelope's idempotencyKey (audit trail, optional)" },
+        approved: { type: "boolean", description: "true = approve (default), false = reject" },
+        expiresAt: { type: "string", description: "ISO expiry for the approval (optional; default +5min from now)" },
+      },
+      required: ["approvalHash", "correlationId"],
+    },
+  },
 ];
 
 const server = new Server(
@@ -749,6 +764,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               hint: 'call relay_approve with approvalHash to approve, then relay_send'},
               null, 2),
           }],
+        };
+      }
+
+      case "relay_approve": {
+        const approvalHash = String(args?.approvalHash ?? '');
+        const correlationId = String(args?.correlationId ?? '');
+        if (!approvalHash) return { content: [{ type: "text", text: "Error: approvalHash required (from relay_prepare)" }], isError: true };
+        if (!correlationId) return { content: [{ type: "text", text: "Error: correlationId required" }], isError: true };
+        const { approveRelay, rejectRelay } = await import('./core/relay.js');
+        const approved = args?.approved !== false; // default: approve
+        const envelopeId = args?.envelopeId ? String(args.envelopeId) : undefined;
+        const result = approved
+          ? approveRelay({ approvalHash, correlationId, envelopeId, expiresAt: args?.expiresAt ? String(args.expiresAt) : undefined })
+          : rejectRelay({ approvalHash, correlationId, envelopeId });
+        if (!result.ok) {
+          return { content: [{ type: "text", text: `relay_approve: ${result.error}` }], isError: true };
+        }
+        return {
+          content: [{ type: "text", text: JSON.stringify({
+            status: result.status,
+            approvalHash,
+            correlationId,
+            expiresAt: result.expiresAt,
+            eventSeq: result.event?.seq,
+            hint: approved ? 'call relay_send with the same approvalHash to send' : 'relay rejected — relay_send will refuse this hash' }, null, 2) }],
         };
       }
 

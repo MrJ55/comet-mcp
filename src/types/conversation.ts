@@ -160,6 +160,8 @@ export type ConversationEventType =
   | 'delivery.receipt'
   | 'relay.approved'
   | 'relay.rejected'
+  /** P4 R5: CAS consumption of a relay approval (single-use; appended by relay_send). */
+  | 'relay.approval_consumed'
   | 'plan.halted';
 
 /**
@@ -198,6 +200,12 @@ export interface ConversationEvent {
   };
   /** How conversation content was persisted for this event. */
   persistenceMode: ContentPersistenceMode;
+  /** P4 R5: approval hash bound by relay.approved/rejected (single-use CAS key). */
+  approvalHash?: string;
+  /** P4 R5: approval expiry (ISO) on relay.approved; when the approval lapses. */
+  approvalExpiresAt?: string;
+  /** P4 R5: seq of the consuming relay_send on relay.approval_consumed (CAS marker). */
+  consumedBySeq?: number;
   at: string;
 }
 

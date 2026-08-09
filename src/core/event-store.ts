@@ -101,6 +101,12 @@ const correlationIndex = new Map<string, ConversationEvent[]>();
 /** `${provider}:${tabId}` → latest durable cursor checkpoint. */
 let cursorCheckpoints: Record<string, { cursor: string; at: string }> = {};
 
+// ---------------------------------------------------------------------------
+// P4 R5 — relay approval index (single-use CAS against the append-only log)
+// approvalHash → latest approval event; consumedBySeq marks single use.
+// ---------------------------------------------------------------------------
+const approvalIndex = new Map<string, ConversationEvent>();
+
 let loaded = false;
 
 function ensureLoaded(): void {
@@ -121,6 +127,10 @@ function ensureLoaded(): void {
           const list = correlationIndex.get(ev.correlationId) ?? [];
           list.push(ev);
           correlationIndex.set(ev.correlationId, list);
+        }
+        if (ev.approvalHash && (ev.type === 'relay.approved' || ev.type === 'relay.rejected')) {
+          // latest approval wins the index (append-only: a later event supersedes)
+          approvalIndex.set(ev.approvalHash, ev);
         }
       } catch { /* skip corrupt line — log is append-only, never rewritten */ }
     }
@@ -156,6 +166,10 @@ export function appendEvent(input: {
   receiptStatus?: DeliveryReceipt['status'];
   response?: ConversationEvent['response'];
   persistenceMode?: ContentPersistenceMode;
+  // P4 R5 approval fields (relay.approved / rejected / approval_consumed)
+  approvalHash?: string;
+  approvalExpiresAt?: string;
+  consumedBySeq?: number;
 }): ConversationEvent {
   ensureLoaded();
   const mode = input.persistenceMode ?? 'full';
@@ -167,6 +181,9 @@ export function appendEvent(input: {
     envelopeId: input.envelopeId,
     idempotencyKey: input.idempotencyKey,
     receiptStatus: input.receiptStatus,
+    approvalHash: input.approvalHash,
+    approvalExpiresAt: input.approvalExpiresAt,
+    consumedBySeq: input.consumedBySeq,
     // P4 R2: redaction enforced at the write path — no caller can leak content
     response: input.response ? redactResponseForMode(input.response, mode) : undefined,
     persistenceMode: mode,
@@ -371,6 +388,81 @@ export function recordDeliveryReceipt(receipt: DeliveryReceipt): ConversationEve
   });
 }
 
+// ---------------------------------------------------------------------------
+// P4 R5 — relay approvals: append-only + single-use via CAS
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a relay approval or rejection (append-only, keyed by approvalHash).
+ * Returns the recorded event, or null when the SAME hash was already recorded
+ * (append-only single-use: a hash may be approved/rejected once — later calls
+ * return null and do NOT overwrite; relay_send CAS-consume is the gate).
+ */
+export function recordRelayApproval(input: {
+  approvalHash: string;
+  correlationId: string;
+  envelopeId?: string;
+  approved: boolean;
+  /** ISO expiry — only meaningful on approvals (rejections are terminal). */
+  expiresAt?: string;
+}): ConversationEvent | null {
+  ensureLoaded();
+  const existing = approvalIndex.get(input.approvalHash);
+  if (existing) return null; // single-use: first record wins, never overwrite
+  const ev = appendEvent({
+    type: input.approved ? 'relay.approved' : 'relay.rejected',
+    correlationId: input.correlationId,
+    envelopeId: input.envelopeId,
+    idempotencyKey: input.envelopeId,
+    approvalHash: input.approvalHash,
+    approvalExpiresAt: input.approved ? input.expiresAt : undefined,
+    persistenceMode: 'none', // control plane only — approval refs, no content
+  });
+  approvalIndex.set(input.approvalHash, ev);
+  return ev;
+}
+
+/** The current approval/rejection record for a hash (single-use state), or null. */
+export function getRelayApproval(approvalHash: string): ConversationEvent | null {
+  ensureLoaded();
+  return approvalIndex.get(approvalHash) ?? null;
+}
+
+/**
+ * Single-use CAS consume (Claude's compare-and-swap vs a boolean flag, design
+ * 05 §1.2/§2): relay_send appends `relay.approval_consumed` ONLY when the
+ * approval exists, is approved, unexpired, and unconsumed. Returns the consumed
+ * event on success, or a reason string — the caller must NOT send on failure.
+ */
+export function consumeRelayApproval(
+  approvalHash: string,
+  correlationId: string,
+  envelopeId?: string,
+): { ok: true; event: ConversationEvent } | { ok: false; reason: string } {
+  ensureLoaded();
+  const approval = approvalIndex.get(approvalHash);
+  if (!approval) return { ok: false, reason: 'unknown_approval' };
+  if (approval.type !== 'relay.approved') return { ok: false, reason: 'not_approved' };
+  if (approval.approvalExpiresAt && new Date(approval.approvalExpiresAt).getTime() < Date.now()) {
+    return { ok: false, reason: 'expired' };
+  }
+  // CAS: has it been consumed already? Scan the correlation for a consumption row.
+  const consumed = eventsForCorrelation(correlationId).some(
+    (e) => e.type === 'relay.approval_consumed' && e.approvalHash === approvalHash,
+  );
+  if (consumed) return { ok: false, reason: 'already_consumed' };
+  const event = appendEvent({
+    type: 'relay.approval_consumed',
+    correlationId,
+    envelopeId,
+    idempotencyKey: envelopeId,
+    approvalHash,
+    consumedBySeq: approval.seq,
+    persistenceMode: 'none',
+  });
+  return { ok: true, event };
+}
+
 /**
  * Reset the store (tests only — wipes data dir files AND memory).
  */
@@ -378,6 +470,7 @@ export function _resetForTests(): void {
   nextSeq = 0;
   idempotencyIndex.clear();
   correlationIndex.clear();
+  approvalIndex.clear();
   cursorCheckpoints = {};
   loaded = false;
   try { mkdirSync(DATA_DIR(), { recursive: true }); } catch { /* ignore */ }
@@ -393,6 +486,7 @@ export function _reloadMemoryForTests(): void {
   nextSeq = 0;
   idempotencyIndex.clear();
   correlationIndex.clear();
+  approvalIndex.clear();
   cursorCheckpoints = {};
   loaded = false;
 }
