@@ -235,6 +235,24 @@ const TOOLS: Tool[] = [
       required: ["responseId"],
     },
   },
+  {
+    name: "relay_prepare",
+    description: "P4: prepare a safe relay of a completed provider response to another provider. Selects the terminal-success source (completed/completed_late only), canonicalizes + hashes the full envelope (content+provenance+destination+policy), runs eager policy checks (approval/attribution/size/deadline/enablement), and returns approvalRequired + approvalHash. NEVER contacts the destination. Follow with relay_approve then relay_send.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sourceCorrelationId: { type: "string", description: "Correlation of the completed source response to relay (from provider_ask / provider_poll result)" },
+        destination: { type: "string", description: "Destination provider: perplexity, grok, gemini, chatgpt, claude" },
+        attributionHeader: { type: "string", description: "Attribution/wrapper text — MANDATORY in approval-required mode, fail closed if unset" },
+        contentSizeLimitBytes: { type: "number", description: "Hard content-size limit for the relay (optional)" },
+        deadlineMs: { type: "number", description: "Approval/relay deadline as epoch ms (optional; default 5min from prepare)" },
+        maxRelaysPerCorrelation: { type: "number", description: "Cap on relay sends per correlation (optional; 0 = none allowed)" },
+        rawMarkdown: { type: "boolean", description: "Opt-in raw markdown pass-through (default false = structural markdown neutralized in approval-required mode)" },
+        contentPersistenceMode: { type: "string", enum: ["full", "redacted", "none"], description: "Persistence mode for relay events (default: redacted for relays)" },
+      },
+      required: ["sourceCorrelationId", "destination"],
+    },
+  },
 ];
 
 const server = new Server(
@@ -688,6 +706,49 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!ok) return { content: [{ type: "text", text: error || 'not found' }], isError: true };
         return {
           content: [{ type: "text", text: `${chunk}${error ? `\n[${error}]` : ''}\n\n(responseId ${rec!.id}, ${rec!.fullChars} chars total)` }],
+        };
+      }
+
+      case "relay_prepare": {
+        const sourceCorrelationId = String(args?.sourceCorrelationId ?? '');
+        const destination = String(args?.destination ?? '');
+        if (!sourceCorrelationId) return { content: [{ type: "text", text: "Error: sourceCorrelationId required (the completed source ask's correlationId)" }], isError: true };
+        if (!knownProvider(destination)) return { content: [{ type: "text", text: `Unknown destination: ${destination} (have: ${knownProviders().join(', ')})` }], isError: true };
+        const { prepareRelay } = await import('./core/relay.js');
+        const result = prepareRelay({
+          sourceCorrelationId,
+          destination: destination as ProviderId,
+          attributionHeader: args?.attributionHeader ? String(args.attributionHeader) : undefined,
+          contentSizeLimitBytes: args?.contentSizeLimitBytes as number | undefined,
+          deadlineMs: args?.deadlineMs as number | undefined,
+          maxRelaysPerCorrelation: args?.maxRelaysPerCorrelation as number | undefined,
+          rawMarkdown: args?.rawMarkdown as boolean | undefined,
+          contentPersistenceMode: args?.contentPersistenceMode as any,
+        });
+        if (!result.ok) {
+          return { content: [{ type: "text", text: `relay_prepare blocked: ${result.error}` }], isError: true };
+        }
+        // compact result (gateway budget) — full envelope content lives on disk via provider_response
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              status: 'prepared',
+              correlationId: result.correlationId,
+              idempotencyKey: result.idempotencyKey,
+              source: result.envelope.source,
+              destination: result.envelope.destination,
+              contentChars: result.envelope.content.length,
+              attributionHeader: result.evaluation.effective.attributionHeader,
+              approvalRequired: result.approvalRequired,
+              approvalHash: result.envelopeHash,
+              policyVersion: result.evaluation.effective.policyVersion,
+              markdownAction: result.evaluation.markdownAction,
+              contentPersistenceMode: result.evaluation.effective.contentPersistenceMode ?? 'redacted',
+              deadlineMs: result.evaluation.effective.deadlineMs,
+              hint: 'call relay_approve with approvalHash to approve, then relay_send'},
+              null, 2),
+          }],
         };
       }
 

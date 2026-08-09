@@ -72,7 +72,16 @@ export function canonicalizeEnvelope(envelope: ConversationEnvelope): string {
   };
   return canonicalJson({
     content,
-    provenance,
+    // relayedAt is transport metadata (when, not what) — excluded like
+    // createdAt so the same logical relay hashes identically across prepares
+    // AND relay_send's hash re-validation matches the approved hash (R6).
+    provenance: {
+      sourceProvider: provenance.sourceProvider,
+      sourceMessageId: provenance.sourceMessageId,
+      sourceContentHash: provenance.sourceContentHash,
+      attributedTo: provenance.attributedTo,
+      safetyClaimed: provenance.safetyClaimed,
+    },
     destination: destination ?? null,
     policy,
   });

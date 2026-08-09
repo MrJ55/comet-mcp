@@ -70,10 +70,15 @@ function markdownActionFor(relay: RelayControls & { policyVersion: number }): Ma
  * point. Fail-closed ordering: disabled → destination → approval →
  * attribution → size → deadline. Returns the effective policy + markdown
  * action so callers shape the wire payload identically to what was checked.
+ *
+ * `deferApproval` (R4 prepare): when true, the approval_required check is
+ * SKIPPED — prepare builds approved:false by design (approval is the NEXT
+ * step, §3.4 output), so approval is not a prepare-time failure. relay_send
+ * (R6) evaluates WITHOUT deferApproval, enforcing approval fully.
  */
 export function evaluateRelayPolicy(
   envelope: ConversationEnvelope,
-  opts: { nowMs?: number } = {},
+  opts: { nowMs?: number; deferApproval?: boolean } = {},
 ): RelayPolicyEvaluation {
   const relay = applyRelayPolicyDefaults(envelope.relay);
   const effective = relay;
@@ -93,7 +98,7 @@ export function evaluateRelayPolicy(
   if (!relay.destinationEnabled) {
     return blocked('destination_disabled', 'destinationEnabled is false');
   }
-  if (relay.mode === 'approval-required' && !relay.approved) {
+  if (relay.mode === 'approval-required' && !relay.approved && !opts.deferApproval) {
     return blocked('approval_required', 'approval required but not granted');
   }
   if (relay.mode === 'approval-required' && !relay.attributionHeader?.trim()) {
