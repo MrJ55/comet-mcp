@@ -440,3 +440,170 @@ export async function sendRelay(
     receiptSeq: receipt.seq,
   };
 }
+
+// ---------------------------------------------------------------------------
+// P4 R7 — unknown-delivery reconciliation (design 05 §3.7, inherits ADR 0007)
+// ---------------------------------------------------------------------------
+
+/**
+ * Reconciliation states for a relayed delivery. Inherits the async-ask machine
+ * (soft expiry → watching → completed_late; abandoned on hard TTL) plus the
+ * RELAY_SURFACE_GONE terminal (closed-tab analogue, §1.6) and the ambiguous
+ * bucket (never auto-promoted, §2).
+ */
+export type RelayReconcileState =
+  | 'in_progress'      // destination ask active — poll again
+  | 'reconciled'       // destination response attributable to the relay
+  | 'timed_out'        // soft expiry — still watched, may complete late
+  | 'ambiguous'        // response present but NOT confidently attributable — never auto-promote
+  | 'surface_gone'     // RELAY_SURFACE_GONE terminal — destination surface vanished
+  | 'blocked'          // terminal — destination refused
+  | 'abandoned';       // terminal — hard TTL reached, no completion
+
+export interface RelayReconcileEvidence {
+  /** Destination ask still tracked by the async-ask registry. */
+  destinationPending: boolean;
+  /** Latest destination ask status: completed / timed_out / watching / tab_closed / abandoned / blocked. */
+  destinationStatus?: string;
+  /** providerMessageId from the destination response (PRIMARY match key, §2). */
+  destinationProviderMessageId?: string;
+  /** contentHash from the destination response (secondary match key, §2). */
+  destinationContentHash?: string;
+  /** The relay's own send receipt status (sent / blocked). */
+  relaySendStatus?: string;
+  /** Whether a destination response event exists at all. */
+  destinationResponded: boolean;
+}
+
+export interface RelayReconcileResult {
+  ok: boolean;
+  state: RelayReconcileState;
+  /** True for terminal states — the client must NOT auto-resend; fresh approval required. */
+  terminal: boolean;
+  matchedBy?: 'providerMessageId' | 'contentHash' | 'ambiguous';
+  providerMessageId?: string;
+  contentHash?: string;
+  details?: string;
+}
+
+/** Terminal states — no further polling/retry without a fresh approval (§3.7). */
+const TERMINAL_STATES: ReadonlySet<RelayReconcileState> = new Set([
+  'reconciled', 'ambiguous', 'surface_gone', 'blocked', 'abandoned',
+]);
+
+/**
+ * Classify relay delivery from async-ask + event-store evidence. Pure and
+ * provider-neutral. Never auto-promotes: a response that cannot be attributed
+ * (no providerMessageId, no contentHash anchor) is AMBIGUOUS — terminal, and a
+ * fresh client approval is required before any resend.
+ */
+export function classifyRelayReconciliation(evidence: RelayReconcileEvidence): RelayReconcileResult {
+  const status = evidence.destinationStatus;
+
+  // terminal destination failures, mapped to relay states
+  if (status === 'tab_closed') {
+    return {
+      ok: false, state: 'surface_gone', terminal: true,
+      details: 'destination surface gone — distinct terminal (design 05 §1.6); fix the destination, then re-run relay_prepare + relay_approve + relay_send',
+    };
+  }
+  if (status === 'abandoned') {
+    return { ok: false, state: 'abandoned', terminal: true, details: 'destination ask abandoned by reaper (hard TTL) — fresh approval required before any resend' };
+  }
+  if (status === 'blocked') {
+    return { ok: false, state: 'blocked', terminal: true, details: 'destination refused the relay — fresh approval required before any resend' };
+  }
+  if (status === 'timed_out' || status === 'watching') {
+    // soft expiry — the ask is STILL pending (ADR 0007 retains the key in
+    // 'watching'); a late destination response may reconcile later. Must be
+    // checked BEFORE the generic pending test below.
+    return { ok: false, state: 'timed_out', terminal: false, details: 'soft expiry — destination still watched; poll again (may complete_late)' };
+  }
+
+  // still in flight — non-terminal (active/working/etc.)
+  if (evidence.destinationPending && status !== 'completed') {
+    return { ok: true, state: 'in_progress', terminal: false };
+  }
+
+  // completed (or responded): attribute it — providerMessageId PRIMARY, contentHash secondary (§2)
+  if (evidence.destinationResponded || status === 'completed') {
+    if (evidence.destinationProviderMessageId) {
+      return {
+        ok: true, state: 'reconciled', terminal: true,
+        matchedBy: 'providerMessageId', providerMessageId: evidence.destinationProviderMessageId,
+        contentHash: evidence.destinationContentHash,
+      };
+    }
+    if (evidence.destinationContentHash) {
+      return {
+        ok: true, state: 'reconciled', terminal: true,
+        matchedBy: 'contentHash', contentHash: evidence.destinationContentHash,
+      };
+    }
+    // response exists but no anchor — NEVER auto-promote (§2 ambiguous bucket)
+    return {
+      ok: false, state: 'ambiguous', terminal: true,
+      matchedBy: 'ambiguous',
+      details: 'destination responded but no providerMessageId/contentHash anchor — ambiguous, never auto-promoted; fresh approval required before any resend',
+    };
+  }
+
+  // relay send itself was refused
+  if (evidence.relaySendStatus === 'blocked') {
+    return { ok: false, state: 'blocked', terminal: true, details: 'relay send was blocked (receipt status blocked)' };
+  }
+
+  // nothing pending, nothing terminal, no response — surface lost mid-flight
+  return {
+    ok: false, state: 'surface_gone', terminal: true,
+    details: 'destination ask is no longer tracked and no response was recorded — surface gone; fresh approval required before any resend',
+  };
+}
+
+/** Inputs to relay_reconcile (R7). */
+export interface RelayReconcileInput {
+  /** The relay chain correlationId (== source correlation, from relay_send). */
+  relayCorrelationId: string;
+  /** The destination ask's correlationId (from relay_send). */
+  destinationCorrelationId: string;
+  /** The destination ask's idempotencyKey — pending check key (from relay_send). */
+  destinationIdempotencyKey?: string;
+}
+
+export interface RelayReconcileDeps {
+  /** True when the destination ask is still tracked by the async-ask registry. */
+  isDestinationPending?: (idempotencyKey: string) => boolean;
+}
+
+/**
+ * R7: reconcile a relayed delivery — read-only probe (never advances the ask,
+ * never resends). Gathers evidence from the event store + async-ask registry
+ * and classifies against the inherited state machine.
+ */
+export function reconcileRelay(input: RelayReconcileInput, deps: RelayReconcileDeps = {}): RelayReconcileResult {
+  const relayReceipts = receiptsForCorrelation(input.relayCorrelationId);
+  // the relay's OWN send receipt: status sent/blocked AND carries policyVersion (R6)
+  const relaySend = [...relayReceipts].reverse().find(
+    (r) => r.policyVersion !== undefined && (r.receiptStatus === 'sent' || r.receiptStatus === 'blocked'),
+  );
+
+  const destEvents = eventsForCorrelation(input.destinationCorrelationId);
+  const destReceipts = receiptsForCorrelation(input.destinationCorrelationId);
+  const destLatestReceipt = [...destReceipts].reverse().find((r) => r.receiptStatus !== undefined);
+  const destResponse = [...destEvents].reverse().find(
+    (e) => e.type === 'response.received' || e.type === 'response.deduplicated',
+  );
+  const destPending =
+    !!deps.isDestinationPending && !!input.destinationIdempotencyKey
+      ? deps.isDestinationPending(input.destinationIdempotencyKey)
+      : false;
+
+  return classifyRelayReconciliation({
+    destinationPending: destPending,
+    destinationStatus: destLatestReceipt?.receiptStatus,
+    destinationProviderMessageId: destResponse?.response?.messageId,
+    destinationContentHash: destResponse?.response?.contentHash,
+    relaySendStatus: relaySend?.receiptStatus,
+    destinationResponded: !!destResponse,
+  });
+}

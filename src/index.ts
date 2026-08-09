@@ -287,6 +287,19 @@ const TOOLS: Tool[] = [
       required: ["approvalHash", "sourceCorrelationId", "destination"],
     },
   },
+  {
+    name: "relay_reconcile",
+    description: "P4: reconcile a relayed delivery (R7) — read-only probe, NEVER resends. Checks the destination ask's state (inherits async-ask soft-expiry/watching) and attributes any destination response via providerMessageId (primary) or contentHash (secondary). Terminal states: reconciled, ambiguous (never auto-promoted), surface_gone, blocked, abandoned. Non-terminal: in_progress, timed_out (poll again). Any resend requires a FRESH relay_prepare + relay_approve.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        relayCorrelationId: { type: "string", description: "The relay chain correlationId (from relay_send)" },
+        destinationCorrelationId: { type: "string", description: "The destination ask's correlationId (from relay_send)" },
+        destinationIdempotencyKey: { type: "string", description: "The destination ask's idempotencyKey (from relay_send) — enables the pending check" },
+      },
+      required: ["relayCorrelationId", "destinationCorrelationId"],
+    },
+  },
 ];
 
 const server = new Server(
@@ -864,6 +877,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             envelopeHash: result.envelopeHash,
             receiptSeq: result.receiptSeq,
             hint: 'use provider_poll with the destination provider to advance the destination ask',
+          }, null, 2) }],
+        };
+      }
+
+      case "relay_reconcile": {
+        const relayCorrelationId = String(args?.relayCorrelationId ?? '');
+        const destinationCorrelationId = String(args?.destinationCorrelationId ?? '');
+        if (!relayCorrelationId) return { content: [{ type: "text", text: "Error: relayCorrelationId required (from relay_send)" }], isError: true };
+        if (!destinationCorrelationId) return { content: [{ type: "text", text: "Error: destinationCorrelationId required (from relay_send)" }], isError: true };
+        const { reconcileRelay } = await import('./core/relay.js');
+        const destinationIdempotencyKey = args?.destinationIdempotencyKey ? String(args.destinationIdempotencyKey) : undefined;
+        const result = reconcileRelay(
+          { relayCorrelationId, destinationCorrelationId, destinationIdempotencyKey },
+          { isDestinationPending: (key) => isAskPending(key) },
+        );
+        return {
+          content: [{ type: "text", text: JSON.stringify({
+            state: result.state,
+            ok: result.ok,
+            terminal: result.terminal,
+            matchedBy: result.matchedBy,
+            providerMessageId: result.providerMessageId,
+            contentHash: result.contentHash,
+            details: result.details,
+            hint: result.terminal && result.state !== 'reconciled'
+              ? 'terminal — no auto-resend; run relay_prepare + relay_approve again for a fresh approval'
+              : (result.state === 'timed_out' ? 'non-terminal — poll provider_poll again (may complete_late)' : undefined),
           }, null, 2) }],
         };
       }
