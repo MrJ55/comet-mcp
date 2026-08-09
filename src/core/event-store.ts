@@ -34,6 +34,66 @@ const CURSORS_FILE = () => join(DATA_DIR(), 'cursors.json');
 /** In-memory seq watermark — the append-only log's monotonic counter. */
 let nextSeq = 0;
 
+// ---------------------------------------------------------------------------
+// P4 R2 — content persistence modes (design 05 §2, §3.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the effective content persistence mode for an envelope.
+ * Per-destination override wins; otherwise: relayed content (destination set)
+ * ⇒ `redacted` (metadata-only, conservative), native ask (no destination) ⇒
+ * `full`. A relay with mode 'disabled' never carries content onward, so it is
+ * also `full`. This is the ONLY place the default is decided — callers must
+ * not inline the heuristic.
+ *
+ * NOTE (regression guard, 2026-08-09): native asks use CONSERVATIVE_RELAY_DEFAULTS
+ * (mode 'approval-required') yet must persist FULL content — the old code only
+ * LABELED them 'redacted' without enforcing it. Keying on `destination` (not
+ * `mode`) preserves that actual behavior while giving real relay traffic the
+ * redacted default.
+ */
+export function resolveContentPersistenceMode(envelope: ConversationEnvelope): ContentPersistenceMode {
+  // Defensive: malformed/bare envelopes (P1-era tests, partial callers) must
+  // never crash the append-only write path — treat missing relay as native/full.
+  if (envelope.relay?.contentPersistenceMode) return envelope.relay.contentPersistenceMode;
+  if (envelope.relay?.mode === 'disabled') return 'full';
+  return envelope.destination ? 'redacted' : 'full';
+}
+
+/**
+ * Redact a response payload to match the persistence mode — applied at the
+ * single appendEvent write path so NO event (including escalation paths) can
+ * leak content under redacted/none. full keeps content+hashes; redacted keeps
+ * metadata only (hashes, ids, cursor, state, contentLength — no text, no
+ * steps, no PII); none keeps control plane only (hashes/ids/status).
+ */
+export function redactResponseForMode(
+  response: NonNullable<ConversationEvent['response']>,
+  mode: ContentPersistenceMode,
+): NonNullable<ConversationEvent['response']> | undefined {
+  if (mode === 'full') return response;
+  const metadata = {
+    provider: response.provider,
+    messageId: response.messageId,
+    contentHash: response.contentHash,
+    cursor: response.cursor,
+    poll: {
+      state: response.poll?.state ?? '',
+      // content deliberately omitted — never persisted under redacted/none
+      response: '',
+      steps: [],
+    },
+  };
+  if (mode === 'redacted') {
+    // length is metadata without content (design 05 §2 redacted spec)
+    return { ...metadata, contentLength: response.poll?.response?.length ?? 0 };
+  }
+  // none: control plane only — even length omitted
+  return metadata;
+}
+
+/** Idempotency index anchor type is ConversationEvent (unchanged). */
+
 /** idempotencyKey → first envelope.created event (replay-safety index). */
 const idempotencyIndex = new Map<string, ConversationEvent>();
 /** correlationId → events (for grouped reads). */
@@ -98,6 +158,7 @@ export function appendEvent(input: {
   persistenceMode?: ContentPersistenceMode;
 }): ConversationEvent {
   ensureLoaded();
+  const mode = input.persistenceMode ?? 'full';
   const event: ConversationEvent = {
     eventId: `evt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     seq: nextSequence(),
@@ -106,8 +167,9 @@ export function appendEvent(input: {
     envelopeId: input.envelopeId,
     idempotencyKey: input.idempotencyKey,
     receiptStatus: input.receiptStatus,
-    response: input.response,
-    persistenceMode: input.persistenceMode ?? 'full',
+    // P4 R2: redaction enforced at the write path — no caller can leak content
+    response: input.response ? redactResponseForMode(input.response, mode) : undefined,
+    persistenceMode: mode,
     at: nowIso(),
   };
   appendFileSync(EVENT_LOG(), JSON.stringify(event) + '\n', 'utf8');
@@ -227,7 +289,7 @@ export function recordEnvelopeCreated(envelope: ConversationEnvelope): Conversat
     correlationId: envelope.correlationId,
     envelopeId: envelope.idempotencyKey, // envelope identity in v1 = its idempotency key
     idempotencyKey: envelope.idempotencyKey,
-    persistenceMode: envelope.relay.mode === 'disabled' ? 'full' : 'redacted',
+    persistenceMode: resolveContentPersistenceMode(envelope),
   });
 }
 
@@ -241,6 +303,7 @@ export function recordSendEvent(
     correlationId: envelope.correlationId,
     envelopeId: envelope.idempotencyKey,
     idempotencyKey: envelope.idempotencyKey,
+    persistenceMode: resolveContentPersistenceMode(envelope),
     receiptStatus: type === 'send.queued' ? 'queued' : type === 'send.accepted' ? 'accepted' : type === 'send.blocked' ? 'blocked' : type === 'send.timed_out' ? 'timed_out' : 'unknown',
   });
 }
@@ -257,6 +320,7 @@ export function recordResponseReceived(
     correlationId: envelope.correlationId,
     envelopeId: envelope.idempotencyKey,
     idempotencyKey: envelope.idempotencyKey,
+    persistenceMode: resolveContentPersistenceMode(envelope),
     response: {
       provider,
       messageId: response.messageId,
@@ -280,6 +344,7 @@ export function recordResponseDeduplicated(
     correlationId: envelope.correlationId,
     envelopeId: envelope.idempotencyKey,
     idempotencyKey: envelope.idempotencyKey,
+    persistenceMode: resolveContentPersistenceMode(envelope),
     response: {
       provider,
       messageId: response.messageId,
@@ -302,6 +367,7 @@ export function recordDeliveryReceipt(receipt: DeliveryReceipt): ConversationEve
     envelopeId: receipt.envelopeId,
     idempotencyKey: receipt.idempotencyKey,
     receiptStatus: receipt.status,
+    persistenceMode: receipt.persistenceMode ?? 'full',
   });
 }
 

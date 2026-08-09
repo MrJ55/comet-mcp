@@ -90,6 +90,13 @@ export interface RelayControls {
    * envelopes (design 05 §3.1). Defaults to RELAY_POLICY_VERSION when unset.
    */
   policyVersion?: number;
+  /**
+   * P4 R2: per-destination content persistence mode (design 05 §2).
+   * full = content+hashes; redacted = metadata-only (no content, no PII);
+   * none = control plane only (ids/hashes/status/timestamps). When unset,
+   * resolveContentPersistenceMode() defaults: relay ⇒ redacted, native ⇒ full.
+   */
+  contentPersistenceMode?: ContentPersistenceMode;
 }
 
 /**
@@ -165,6 +172,11 @@ export interface ConversationEvent {
       response: string;
       steps: string[];
     };
+    /**
+     * P4 R2: character length of the ORIGINAL response text. Present only in
+     * `redacted` mode — metadata without content (design 05 §2).
+     */
+    contentLength?: number;
   };
   /** How conversation content was persisted for this event. */
   persistenceMode: ContentPersistenceMode;
@@ -196,6 +208,11 @@ export interface DeliveryReceipt {
   cursor?: string;
   /** Optional driver/provider detail (e.g. "blocked: size 12KB > 8KB limit"). */
   details?: string;
+  /**
+   * P4 R2: content persistence mode in effect for this receipt's correlation
+   * (design 05 §3.2 — receipts carry the mode). Mirrors the event's mode.
+   */
+  persistenceMode?: ContentPersistenceMode;
 }
 
 /** Conservative relay defaults (P1 task list item 7, build plan safety defaults). */

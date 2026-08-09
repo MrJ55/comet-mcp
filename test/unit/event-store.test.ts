@@ -66,11 +66,12 @@ test('P1 H2: idempotency index — replay with same key detected, no duplicate s
 test('P1 H2: response dedup — same contentHash twice → hasResponseHash true, dedup event records', () => {
   _resetForTests();
   const env = { correlationId: 'c-hash', idempotencyKey: 'k-hash' };
-  recordEnvelopeCreated({ ...env, source: 'grok', content: 'hi', provenance: { sourceProvider: 'grok', attributedTo: 'grok', safetyClaimed: false }, relay: { mode: 'disabled', approved: false, destinationEnabled: false }, budget: { maxTurns: 1, wallClockDeadlineMs: 0 }, createdAt: '' });
+  const fullEnv = { ...env, source: 'grok', content: 'hi', provenance: { sourceProvider: 'grok', attributedTo: 'grok', safetyClaimed: false }, relay: { mode: 'disabled', approved: false, destinationEnabled: false }, budget: { maxTurns: 1, wallClockDeadlineMs: 0 }, createdAt: '' };
+  recordEnvelopeCreated(fullEnv as any);
   assert.equal(hasResponseHash('c-hash', 'abc123'), false);
-  recordResponseReceived(env as any, 'grok', { contentHash: 'abc123', cursor: 'cur-1', state: 'completed', text: 'answer', steps: [] }, 'tab-1');
+  recordResponseReceived(fullEnv as any, 'grok', { contentHash: 'abc123', cursor: 'cur-1', state: 'completed', text: 'answer', steps: [] }, 'tab-1');
   assert.equal(hasResponseHash('c-hash', 'abc123'), true, 'hash recorded');
-  const dedup = recordResponseDeduplicated(env as any, 'grok', { contentHash: 'abc123', cursor: 'cur-1', state: 'completed', text: 'answer', steps: [] });
+  const dedup = recordResponseDeduplicated(fullEnv as any, 'grok', { contentHash: 'abc123', cursor: 'cur-1', state: 'completed', text: 'answer', steps: [] });
   assert.equal(dedup.type, 'response.deduplicated');
   assert.equal(eventsForCorrelation('c-hash').filter((e) => e.type === 'response.received').length, 1, 'no second received event');
 });
