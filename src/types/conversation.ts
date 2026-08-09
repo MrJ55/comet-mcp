@@ -206,6 +206,8 @@ export interface ConversationEvent {
   approvalExpiresAt?: string;
   /** P4 R5: seq of the consuming relay_send on relay.approval_consumed (CAS marker). */
   consumedBySeq?: number;
+  /** P4 R6: relay policy version in effect (receipts carry it, design 05 §3.6). */
+  policyVersion?: number;
   at: string;
 }
 
@@ -239,6 +241,11 @@ export interface DeliveryReceipt {
    * (design 05 §3.2 — receipts carry the mode). Mirrors the event's mode.
    */
   persistenceMode?: ContentPersistenceMode;
+  /**
+   * P4 R6: relay policy version in effect when the attempt was made (design
+   * 05 §3.6 — receipts carry the policyVersion). Set on relay receipts.
+   */
+  policyVersion?: number;
 }
 
 /** Conservative relay defaults (P1 task list item 7, build plan safety defaults). */

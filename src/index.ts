@@ -268,6 +268,25 @@ const TOOLS: Tool[] = [
       required: ["approvalHash", "correlationId"],
     },
   },
+  {
+    name: "relay_send",
+    description: "P4: send an approved relay to the destination provider. Re-validates the envelope hash against the approvalHash (hash binding), re-runs policy (approval now REQUIRED), pre-flights the destination surface (surface-gone → distinct terminal, approval NOT consumed), CAS-consumes the approval (single-use), then sends with the attribution header + content to the destination via its driver. Receipt recorded on EVERY attempt. Returns the destination correlationId to poll with provider_poll.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        approvalHash: { type: "string", description: "The approvalHash from relay_approve (must equal the recomputed envelope hash)" },
+        sourceCorrelationId: { type: "string", description: "Same sourceCorrelationId passed to relay_prepare (re-validates the hash)" },
+        destination: { type: "string", description: "Same destination passed to relay_prepare" },
+        attributionHeader: { type: "string", description: "Same attributionHeader passed to relay_prepare" },
+        contentSizeLimitBytes: { type: "number", description: "Same limit passed to relay_prepare (must match to re-validate hash)" },
+        deadlineMs: { type: "number", description: "Same deadline passed to relay_prepare" },
+        maxRelaysPerCorrelation: { type: "number", description: "Same cap passed to relay_prepare" },
+        rawMarkdown: { type: "boolean", description: "Same rawMarkdown passed to relay_prepare" },
+        contentPersistenceMode: { type: "string", enum: ["full", "redacted", "none"], description: "Same persistence mode passed to relay_prepare" },
+      },
+      required: ["approvalHash", "sourceCorrelationId", "destination"],
+    },
+  },
 ];
 
 const server = new Server(
@@ -789,6 +808,63 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             expiresAt: result.expiresAt,
             eventSeq: result.event?.seq,
             hint: approved ? 'call relay_send with the same approvalHash to send' : 'relay rejected — relay_send will refuse this hash' }, null, 2) }],
+        };
+      }
+
+      case "relay_send": {
+        const approvalHash = String(args?.approvalHash ?? '');
+        const sourceCorrelationId = String(args?.sourceCorrelationId ?? '');
+        const destination = String(args?.destination ?? '');
+        if (!approvalHash) return { content: [{ type: "text", text: "Error: approvalHash required" }], isError: true };
+        if (!sourceCorrelationId) return { content: [{ type: "text", text: "Error: sourceCorrelationId required" }], isError: true };
+        if (!knownProvider(destination)) return { content: [{ type: "text", text: `Unknown destination: ${destination} (have: ${knownProviders().join(', ')})` }], isError: true };
+        const driver = getDriver(destination);
+        if (!driver) return { content: [{ type: "text", text: `No driver for destination ${destination} — cannot send` }], isError: true };
+        const { sendRelay } = await import('./core/relay.js');
+        const result = await sendRelay(
+          {
+            approvalHash,
+            sourceCorrelationId,
+            destination: destination as ProviderId,
+            attributionHeader: args?.attributionHeader ? String(args.attributionHeader) : undefined,
+            contentSizeLimitBytes: args?.contentSizeLimitBytes as number | undefined,
+            deadlineMs: args?.deadlineMs as number | undefined,
+            maxRelaysPerCorrelation: args?.maxRelaysPerCorrelation as number | undefined,
+            rawMarkdown: args?.rawMarkdown as boolean | undefined,
+            contentPersistenceMode: args?.contentPersistenceMode as any,
+          },
+          {
+            // surface-gone pre-flight: destination tab must be addressable
+            preflight: async () => {
+              const tab = tabRegistry.getProviderTab(destination as ProviderId);
+              return tab ? { ok: true } : { ok: false, reason: `no registered tab for ${destination} — use provider_open first` };
+            },
+            // actual send: open/ensure tab + dispatch async ask (client polls via provider_poll)
+            send: async (wireContent: string) => {
+              try {
+                const session = await openTab(destination);
+                if (!session) return { ok: false, error: `could not open destination tab for ${destination}` };
+                const dispatched = await dispatchAsk(driver, session, wireContent);
+                return { ok: true, correlationId: dispatched.correlationId, idempotencyKey: dispatched.idempotencyKey };
+              } catch (error) {
+                return { ok: false, error: error instanceof Error ? error.message : String(error) };
+              }
+            },
+          },
+        );
+        if (!result.ok) {
+          return { content: [{ type: "text", text: `relay_send ${result.status}: ${result.error}` }], isError: true };
+        }
+        return {
+          content: [{ type: "text", text: JSON.stringify({
+            status: 'sent',
+            destination,
+            destinationCorrelationId: result.destinationCorrelationId,
+            destinationIdempotencyKey: result.destinationIdempotencyKey,
+            envelopeHash: result.envelopeHash,
+            receiptSeq: result.receiptSeq,
+            hint: 'use provider_poll with the destination provider to advance the destination ask',
+          }, null, 2) }],
         };
       }
 

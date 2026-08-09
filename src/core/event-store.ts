@@ -170,6 +170,8 @@ export function appendEvent(input: {
   approvalHash?: string;
   approvalExpiresAt?: string;
   consumedBySeq?: number;
+  // P4 R6: receipts carry policyVersion (design 05 §3.6)
+  policyVersion?: number;
 }): ConversationEvent {
   ensureLoaded();
   const mode = input.persistenceMode ?? 'full';
@@ -184,6 +186,7 @@ export function appendEvent(input: {
     approvalHash: input.approvalHash,
     approvalExpiresAt: input.approvalExpiresAt,
     consumedBySeq: input.consumedBySeq,
+    policyVersion: input.policyVersion,
     // P4 R2: redaction enforced at the write path — no caller can leak content
     response: input.response ? redactResponseForMode(input.response, mode) : undefined,
     persistenceMode: mode,
@@ -385,6 +388,7 @@ export function recordDeliveryReceipt(receipt: DeliveryReceipt): ConversationEve
     idempotencyKey: receipt.idempotencyKey,
     receiptStatus: receipt.status,
     persistenceMode: receipt.persistenceMode ?? 'full',
+    policyVersion: receipt.policyVersion,
   });
 }
 

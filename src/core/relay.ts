@@ -15,14 +15,16 @@
  * yields the same approval hash.
  */
 
-import type { ContentPersistenceMode, ConversationEnvelope, ConversationEvent, ProviderId, RelayControls } from '../types/conversation.js';
+import type { ContentPersistenceMode, ConversationEnvelope, ConversationEvent, DeliveryReceipt, ProviderId, RelayControls } from '../types/conversation.js';
 import { computeEnvelopeHash, canonicalizeEnvelope } from './envelope.js';
-import { evaluateRelayPolicy, type RelayPolicyEvaluation } from './relay-policy.js';
+import { evaluateRelayPolicy, neutralizeMarkdown, type RelayPolicyEvaluation } from './relay-policy.js';
 import {
   eventsForCorrelation,
   receiptsForCorrelation,
   recordEnvelopeCreated,
   recordRelayApproval,
+  recordDeliveryReceipt,
+  resolveContentPersistenceMode,
   getRelayApproval,
   consumeRelayApproval,
 } from './event-store.js';
@@ -127,6 +129,34 @@ function buildRelayControls(input: RelayPrepareInput): RelayControls {
  * + hashes the envelope, runs eager policy checks. NEVER contacts the destination.
  */
 export function prepareRelay(input: RelayPrepareInput): RelayPrepareResult | RelayPrepareError {
+  const built = buildRelayEnvelope(input);
+  if (!built.ok) return { ok: false, error: built.error, policyReason: built.policyReason };
+  const { envelope, canonical, envelopeHash, evaluation } = built;
+
+  // Durable trail anchor: envelope.created with the relay's persistence mode.
+  // (R2 wired the mode into the write path — relay content defaults to redacted.)
+  recordEnvelopeCreated(envelope);
+
+  return {
+    ok: true,
+    correlationId: envelope.correlationId,
+    idempotencyKey: envelope.idempotencyKey,
+    envelope,
+    canonical,
+    envelopeHash,
+    approvalRequired: envelope.relay.mode === 'approval-required',
+    evaluation,
+  };
+}
+
+/**
+ * Pure envelope build + canonicalize + hash + policy evaluation (NO writes).
+ * Shared by prepareRelay (records envelope.created) and sendRelay (re-validates
+ * the SAME envelope without double-recording). Exported for R6 + tests.
+ */
+export function buildRelayEnvelope(input: RelayPrepareInput):
+  | { ok: true; envelope: ConversationEnvelope; canonical: string; envelopeHash: string; evaluation: RelayPolicyEvaluation }
+  | { ok: false; error: string; policyReason?: RelayPolicyEvaluation['reason'] } {
   const source = findRelaySource(input.sourceCorrelationId);
   if (!source) {
     return {
@@ -173,22 +203,14 @@ export function prepareRelay(input: RelayPrepareInput): RelayPrepareResult | Rel
       ok: false,
       error: `relay policy blocked: ${evaluation.reason} — ${evaluation.details}`,
       policyReason: evaluation.reason,
-      evaluation,
     };
   }
 
-  // Durable trail anchor: envelope.created with the relay's persistence mode.
-  // (R2 wired the mode into the write path — relay content defaults to redacted.)
-  recordEnvelopeCreated(envelope);
-
   return {
     ok: true,
-    correlationId: envelope.correlationId,
-    idempotencyKey: envelope.idempotencyKey,
     envelope,
     canonical: canonicalizeEnvelope(envelope),
     envelopeHash: computeEnvelopeHash(envelope),
-    approvalRequired: envelope.relay.mode === 'approval-required',
     evaluation,
   };
 }
@@ -277,4 +299,144 @@ export function casConsumeApproval(
   envelopeId?: string,
 ): { ok: true; event: ConversationEvent } | { ok: false; reason: string } {
   return consumeRelayApproval(approvalHash, correlationId, envelopeId);
+}
+
+// ---------------------------------------------------------------------------
+// P4 R6 — relay_send (design 05 §3.6)
+// ---------------------------------------------------------------------------
+
+/** How relay_send hands the wire payload to the destination (provider-neutral). */
+export interface RelaySendDeps {
+  /**
+   * Pre-flight: verify the destination surface is present (surface-gone check,
+   * §3.6/§3.7). Returns ok:false with a reason when the surface is gone — the
+   * send MUST NOT proceed and the approval is NOT consumed.
+   */
+  preflight?: () => Promise<{ ok: boolean; reason?: string }>;
+  /**
+   * Send the wire payload to the destination provider. Returns the destination
+   * correlation/idempotencyKey for the caller to poll. MUST NOT throw — return
+   * { ok:false } instead (receipts are append-only per attempt).
+   */
+  send: (wireContent: string) => Promise<{
+    ok: boolean;
+    correlationId?: string;
+    idempotencyKey?: string;
+    error?: string;
+  }>;
+}
+
+/** Inputs to relay_send (R6) — must match the prepare inputs to re-validate the hash. */
+export type RelaySendInput = RelayPrepareInput & { approvalHash: string };
+
+export interface RelaySendResult {
+  ok: boolean;
+  status: 'sent' | 'blocked' | 'surface_gone' | 'approval_failed' | 'error';
+  error?: string;
+  /** The prepared relay envelope (content for provenance header). */
+  envelope?: ConversationEnvelope;
+  envelopeHash?: string;
+  /** Destination ask identifiers (set when ok). */
+  destinationCorrelationId?: string;
+  destinationIdempotencyKey?: string;
+  /** The receipt row seq (append-only per attempt). */
+  receiptSeq?: number;
+}
+
+/**
+ * Build the WIRE payload for the destination: attribution header + content,
+ * with structural markdown neutralized when the policy demands it (design §2:
+ * markdown is a trust-boundary control, rawMarkdown opt-in).
+ */
+export function buildWireContent(envelope: ConversationEnvelope, evaluation: RelayPolicyEvaluation): string {
+  const header = envelope.relay.attributionHeader?.trim() ? envelope.relay.attributionHeader.trim() + '\n\n' : '';
+  const body = evaluation.markdownAction === 'neutralize' ? neutralizeMarkdown(envelope.content) : envelope.content;
+  return header + body;
+}
+
+/**
+ * R6: send a prepared + approved relay. Order (fail-closed):
+ *  1. re-validate the envelope hash against the approvalHash (hash binding)
+ *  2. re-validate policy (no deferApproval — approval is REQUIRED here)
+ *  3. surface-gone pre-flight (destination present?) — no consume on failure
+ *  4. CAS-consume the approval (single-use) — after pre-flight, before send
+ *  5. send via deps.send, receipt on EVERY attempt (append-only)
+ *
+ * The approval is consumed only when the send is actually attempted — a
+ * surface-gone pre-flight failure leaves it consumable (client may retry after
+ * fixing the destination).
+ */
+export async function sendRelay(
+  input: RelaySendInput,
+  deps: RelaySendDeps,
+): Promise<RelaySendResult> {
+  // build the SAME envelope the approval was minted on (no re-record — prepare
+  // already wrote envelope.created; send re-validates, it does not re-create)
+  const prepared = buildRelayEnvelope(input);
+  if (!prepared.ok) {
+    return { ok: false, status: prepared.policyReason ? 'blocked' : 'error', error: prepared.error };
+  }
+  const { envelope, envelopeHash, evaluation } = prepared;
+
+  // 1. hash binding: the recomputed envelope must hash to the approved hash
+  if (envelopeHash !== input.approvalHash) {
+    return {
+      ok: false,
+      status: 'approval_failed',
+      error: 'envelope hash mismatch — the relay was re-prepared with different content/policy/destination since approval; re-run relay_prepare + relay_approve',
+    };
+  }
+
+  // 2. policy re-validation. The envelope's `approved` flag is a PLACEHOLDER
+  // (approval lives in the store via relay_approve) — so the policy check here
+  // defers approval (deferApproval) and the APPROVAL GATE is the CAS consume
+  // below, which checks store state (approved + unexpired + unconsumed).
+  if (!evaluation.ok) {
+    return { ok: false, status: 'blocked', error: `policy blocked: ${evaluation.reason} — ${evaluation.details}` };
+  }
+
+  // 3. surface-gone pre-flight (design §3.6/§3.7: distinct terminal, no consume)
+  if (deps.preflight) {
+    const surface = await deps.preflight();
+    if (!surface.ok) {
+      return {
+        ok: false,
+        status: 'surface_gone',
+        error: `destination surface gone: ${surface.reason ?? 'unknown'} — fix the destination and retry (approval NOT consumed)`,
+      };
+    }
+  }
+
+  // 4. CAS-consume the approval (single-use) — after pre-flight, before send
+  const consumed = casConsumeApproval(input.approvalHash, envelope.correlationId, envelope.idempotencyKey);
+  if (!consumed.ok) {
+    return { ok: false, status: 'approval_failed', error: `approval cannot be consumed: ${consumed.reason}` };
+  }
+
+  // 5. send + receipt on EVERY attempt (append-only)
+  const wire = buildWireContent(envelope, evaluation);
+  const sendResult = await deps.send(wire);
+  const status = sendResult.ok ? 'sent' : 'blocked';
+  const receipt = recordDeliveryReceipt({
+    receiptId: `rct-${envelope.correlationId}-${Date.now().toString(36)}`,
+    envelopeId: envelope.idempotencyKey,
+    correlationId: envelope.correlationId,
+    idempotencyKey: envelope.idempotencyKey,
+    status: status === 'sent' ? 'sent' : 'blocked',
+    recordedAt: new Date().toISOString(),
+    persistenceMode: resolveContentPersistenceMode(envelope),
+    policyVersion: evaluation.effective.policyVersion,
+    details: sendResult.ok ? undefined : sendResult.error,
+  });
+
+  return {
+    ok: sendResult.ok,
+    status,
+    error: sendResult.ok ? undefined : sendResult.error,
+    envelope,
+    envelopeHash,
+    destinationCorrelationId: sendResult.correlationId,
+    destinationIdempotencyKey: sendResult.idempotencyKey,
+    receiptSeq: receipt.seq,
+  };
 }
