@@ -84,6 +84,12 @@ export interface RelayControls {
   contentSizeLimitBytes?: number;
   /** Relay deadline. */
   deadlineMs?: number;
+  /**
+   * P4 R1: policy schema version, stamped into the envelope hash. Bumps when the
+   * hashed policy field set changes so old approvals can never validate new
+   * envelopes (design 05 §3.1). Defaults to RELAY_POLICY_VERSION when unset.
+   */
+  policyVersion?: number;
 }
 
 /**
