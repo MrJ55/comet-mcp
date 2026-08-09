@@ -296,20 +296,22 @@ For each provider:
 
 **Outcome:** controlled cross-provider communication with provenance and receipts.
 
-- [ ] Implement `relay_prepare` to select the source event and build an envelope.
-- [ ] Enforce relay policy before transmission: approval, attribution, length, markdown treatment, timeout, and provider enablement.
-- [ ] **Bind approval to a hash of the exact envelope — single-use, expiring** (Perplexity critique 2026-08-07: otherwise content can mutate between approval and send).
-- [ ] Implement wrapped relay with an explicit provenance header.
-- [ ] Implement local summarization handoff as a client-controlled action, not an implicit claim that the server is Claude.
-- [ ] Implement `relay_send` and record a receipt for every attempt (append-only receipt stream, not mutable records — Perplexity critique).
-- [ ] Add content-size and structure limits before provider input.
-- [ ] Add conversation-log persistence and **redaction / no-content logging as first-class config** (Grok + Perplexity critiques — before P4 ships, not an afterthought).
-- [ ] **Specify unknown-delivery reconciliation**: read-only re-extraction matching content hash / providerMessageId at the destination before any client-approved resend (Perplexity critique).
-- [ ] Test blocked, timed-out, and uncertain deliveries without automatic resend.
+- [x] Implement `relay_prepare` to select the source event and build an envelope. — **DONE 2026-08-09 (R4, 86d8535)**: `findRelaySource` (terminal-success only: completed/completed_late, §1.5) + `prepareRelay` (envelope build/canonicalize/hash, eager checks, `envelope.created` anchor, approvalHash, no destination contact)
+- [x] Enforce relay policy before transmission: approval, attribution, length, markdown treatment, timeout, and provider enablement. — **DONE 2026-08-09 (R3, d625572)**: `evaluateRelayPolicy` fail-closed (disabled → destination → approval → attribution mandatory → size → deadline) + markdown trust boundary (neutralize unless rawMarkdown opt-in)
+- [x] **Bind approval to a hash of the exact envelope — single-use, expiring** (Perplexity critique 2026-08-07: otherwise content can mutate between approval and send). — **DONE 2026-08-09 (R1 f652ed3 + R5 4a13e0c)**: canonicalize content+provenance+destination+policy, sha256, policyVersion stamped; relay.approved/rejected append-only keyed by approvalHash, single-use CAS consume vs the store
+- [x] Implement wrapped relay with an explicit provenance header. — **DONE 2026-08-09 (R6, 0a95492)**: `buildWireContent` = attributionHeader + content (neutralized unless rawMarkdown)
+- [ ] Implement local summarization handoff as a client-controlled action, not an implicit claim that the server is Claude. — **DEFERRED to P4b** (design 05: collides with approval-binding scope)
+- [x] Implement `relay_send` and record a receipt for every attempt (append-only receipt stream, not mutable records — Perplexity critique). — **DONE 2026-08-09 (R6, 0a95492)**: hash-binding re-validation, surface-gone pre-flight (approval preserved), CAS-consume, receipt on every attempt carrying persistenceMode + policyVersion
+- [x] Add content-size and structure limits before provider input. — **DONE 2026-08-09 (R3, d625572)**: contentSizeLimitBytes + deadlineMs enforced eagerly at prepare AND send
+- [x] Add conversation-log persistence and **redaction / no-content logging as first-class config** (Grok + Perplexity critiques — before P4 ships, not an afterthought). — **DONE 2026-08-09 (R2, 194dc77)**: ContentPersistenceMode full/redacted/none wired into the append-only write path; relay⇒redacted default, native⇒full (replay-safe); receipts carry the mode
+- [x] **Specify unknown-delivery reconciliation**: read-only re-extraction matching content hash / providerMessageId at the destination before any client-approved resend (Perplexity critique). — **DONE 2026-08-09 (R7, b3dd0e8)**: inherits async-ask soft-expiry, `RELAY_SURFACE_GONE` terminal, providerMessageId-primary + ambiguous bucket (never auto-promoted), read-only probe, fresh approval before any resend
+- [x] Test blocked, timed-out, and uncertain deliveries without automatic resend. — **DONE 2026-08-09 (R8, 2006ada)**: crossed-axis matrix — policy drift, expired+ambiguous, surface-gone+pending-approval, no-auto-resend, all 3 persistence modes, no-leak audit; 199/199 tests
 
 **Gate:** a selected Perplexity or Grok answer can be relayed to the other only after approval, with a complete event trail and safe failure behavior.
 
 **Reviewed + re-sequenced 2026-08-08** (Grok + Claude consultations, both in `responses/`): the task list is analyzed in `docs/design/05-p4-relay-design.md` — build order R1-R9 (envelope canonicalization → ContentPersistenceMode → policy → prepare → approve → send → reconciliation → crossed-axis tests → docs); local summarization handoff deferred to P4b; unknown-delivery reconciliation inherits the async-ask state machine including a `RELAY_SURFACE_GONE` terminal (closed-tab escalation analogue); `wait_any` (P5) held until reconciliation stabilizes.
+
+**DONE 2026-08-09 (R1-R8, commits f652ed3 → 2006ada, ADR 0008, 199/199 tests)** — see `docs/adr/0008-p4-safe-relay-envelope-hash-approval-cas.md` for the full decision record.
 
 ### P5 — Bounded scheduling and efficient waiting
 

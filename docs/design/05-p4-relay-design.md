@@ -1,7 +1,7 @@
 # P4 — Safe relay and shared conversation state (design, two-provider review)
 
-**Status:** design — synthesized 2026-08-08 from the Turn-02 P4 task list +
-two provider consultations
+**Status:** ✅ IMPLEMENTED 2026-08-09 — R1–R9 all landed (commits f652ed3 → this;
+ADR 0008; 199/199 tests). Deferred to P4b: summarization handoff.
 **Sources:** [Grok consultation](../../responses/grok-p4-consultation-2026-08-08.md)
 (9594 chars, active tab); [Claude consultation](../../responses/claude-p4-consultation-2026-08-08.md)
 (7775 chars, via MCP). Turn-02 §P4; ADR 0001 (relay defaults), ADR 0002
@@ -93,23 +93,23 @@ for timed-out / blocked / surface-gone).
 
 ## 5. Task checklist
 
-- [ ] **R1** Envelope canonicalization + `envelopeHash` (sha256 over
-      content+provenance+destination+policy, `policyVersion` stamped).
-- [ ] **R2** ContentPersistenceMode contract (per-destination) + event-store
+- [x] **R1** Envelope canonicalization + `envelopeHash` (sha256 over
+      content+provenance+destination+policy, `policyVersion` stamped). — DONE 2026-08-09 (f652ed3)
+- [x] **R2** ContentPersistenceMode contract (per-destination) + event-store
       write-path wiring (modes: full/redacted/none per §2 spec); receipts carry
-      the mode; escalation paths audited for leakage.
-- [ ] **R3** Relay policy fields (additions above) + enforcement module
-      (approval/attribution/length/markdown/deadline/enablement).
-- [ ] **R4** `relay_prepare` tool (build/canonicalize/hash, eager checks,
-      terminal-success source selection, approvalHash).
-- [ ] **R5** `relay_approve` tool (relay.approved/rejected events, expiry,
-      single-use via CAS).
-- [ ] **R6** `relay_send` tool (re-validate, CAS-consume, provenance header,
-      receipt every attempt, reconciliation pre-flight incl. surface-gone).
-- [ ] **R7** Reconciliation state machine (inherit async-ask soft-expiry +
+      the mode; escalation paths audited for leakage. — DONE 2026-08-09 (194dc77)
+- [x] **R3** Relay policy fields (additions above) + enforcement module
+      (approval/attribution/length/markdown/deadline/enablement). — DONE 2026-08-09 (d625572)
+- [x] **R4** `relay_prepare` tool (build/canonicalize/hash, eager checks,
+      terminal-success source selection, approvalHash). — DONE 2026-08-09 (86d8535)
+- [x] **R5** `relay_approve` tool (relay.approved/rejected events, expiry,
+      single-use via CAS). — DONE 2026-08-09 (4a13e0c)
+- [x] **R6** `relay_send` tool (re-validate, CAS-consume, provenance header,
+      receipt every attempt, reconciliation pre-flight incl. surface-gone). — DONE 2026-08-09 (0a95492)
+- [x] **R7** Reconciliation state machine (inherit async-ask soft-expiry +
       `RELAY_SURFACE_GONE` terminal; providerMessageId primary, ambiguous
-      bucket; read-only probe; fresh approval before resend).
-- [ ] **R8** Crossed-axis test matrix (§3.8) + all persistence modes + no-leak
-      escalation audit. Full suite green.
-- [ ] **R9** Docs: ADR 0008 (relay + approval binding), build-plan P4 row,
-      Turn-02 checkboxes.
+      bucket; read-only probe; fresh approval before resend). — DONE 2026-08-09 (b3dd0e8)
+- [x] **R8** Crossed-axis test matrix (§3.8) + all persistence modes + no-leak
+      escalation audit. Full suite green. — DONE 2026-08-09 (2006ada, 199/199)
+- [x] **R9** Docs: ADR 0008 (relay + approval binding), build-plan P4 row,
+      Turn-02 checkboxes. — DONE 2026-08-09 (this commit)
