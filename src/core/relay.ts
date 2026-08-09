@@ -395,6 +395,21 @@ export async function sendRelay(
     return { ok: false, status: 'blocked', error: `policy blocked: ${evaluation.reason} — ${evaluation.details}` };
   }
 
+  // 2b. fail-fast approval EXISTENCE check (before surface pre-flight): a hash
+  // never approved (or already rejected) must fail here — approval_failed —
+  // regardless of surface state. The single-use CAS consume below remains the
+  // authoritative gate (expiry + consumed), after pre-flight.
+  const approvalRecord = getRelayApproval(input.approvalHash);
+  if (!approvalRecord || approvalRecord.type !== 'relay.approved') {
+    return {
+      ok: false,
+      status: 'approval_failed',
+      error: approvalRecord
+        ? `approval for hash was ${approvalRecord.type === 'relay.rejected' ? 'rejected' : 'not approved'} — relay_approve first`
+        : 'no approval recorded for this hash — run relay_prepare + relay_approve first',
+    };
+  }
+
   // 3. surface-gone pre-flight (design §3.6/§3.7: distinct terminal, no consume)
   if (deps.preflight) {
     const surface = await deps.preflight();
