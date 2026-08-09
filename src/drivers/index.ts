@@ -1059,6 +1059,69 @@ export function startReaper(): void {
   if (typeof (timer as any).unref === 'function') (timer as any).unref();
 }
 
+// ---------------------------------------------------------------------------
+// 2026-08-09 (user-requested latency fix): fast internal advance timer.
+// The client learns completion only by polling; a slow client leaves a finished
+// ask sitting. This sweeps pending asks on a SHORT wall clock (like the reaper
+// but advancing instead of purging) so asks finalize between client polls — the
+// client's next provider_poll is a pure read of an already-completed ask.
+// ---------------------------------------------------------------------------
+
+/** Advance cadence — short enough to feel immediate, long enough to not hammer CDP. */
+export const ADVANCE_INTERVAL_MS = 1500;
+/** Skip asks younger than this — the dispatch→submit window (don't race driver.ask). */
+export const ADVANCE_MIN_AGE_MS = 1500;
+/** Per-tick cap — at most this many CDP polls per sweep (thundering-herd guard). */
+export const ADVANCE_MAX_PER_TICK = 4;
+
+let advancerStarted = false;
+let advancerTimer: NodeJS.Timeout | undefined;
+
+/**
+ * Sweep body: advance up to ADVANCE_MAX_PER_TICK pending asks older than
+ * ADVANCE_MIN_AGE_MS. Skips in-flight keys (advanceAsk is async — a concurrent
+ * poll would corrupt prevHash/stableSince bookkeeping). Returns advances done.
+ * `now` injectable for tests.
+ */
+export async function advancePendingAsks(now: number = Date.now()): Promise<number> {
+  let advanced = 0;
+  for (const key of pendingAsks.keys()) {
+    if (advanced >= ADVANCE_MAX_PER_TICK) break;
+    const p = pendingAsks.get(key);
+    if (!p) continue;
+    if (now - p.startTime < ADVANCE_MIN_AGE_MS) continue; // dispatch→submit window
+    if (advancingKeys.has(key)) continue; // already in flight
+    advancingKeys.add(key);
+    try {
+      await advanceAsk(key); // finalizes + removes the entry when complete
+    } catch {
+      /* transient poll failure — advanceAsk handles tab-closed itself; keep sweeping */
+    } finally {
+      advancingKeys.delete(key);
+    }
+    advanced++;
+  }
+  return advanced;
+}
+
+/** Keys currently being advanced by the timer (re-entrancy guard). */
+const advancingKeys = new Set<string>();
+
+/** Start the fast advance interval (idempotent). unref'd so tests/CLI can exit. */
+export function startAdvancer(): void {
+  if (advancerStarted) return;
+  advancerStarted = true;
+  advancerTimer = setInterval(() => { void advancePendingAsks(); }, ADVANCE_INTERVAL_MS);
+  if (typeof (advancerTimer as any).unref === 'function') (advancerTimer as any).unref();
+}
+
+/** Stop the advance interval (tests). */
+export function stopAdvancer(): void {
+  if (advancerTimer) clearInterval(advancerTimer);
+  advancerTimer = undefined;
+  advancerStarted = false;
+}
+
 /** True when a dispatched ask is still pending for this key. */
 export function isAskPending(key: string): boolean {
   return pendingAsks.has(key);

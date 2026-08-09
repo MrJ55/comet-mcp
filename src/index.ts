@@ -24,7 +24,7 @@ import {
 import { cometClient } from "./cdp-client.js";
 import { tabRegistry } from "./tab-registry.js";
 import { sessionPool } from "./cdp-pool.js";
-import { getDriver, listDrivers, openTab, normalizePrompt, askAndWait, askAndWaitOn, dispatchAsk, advanceAsk, isAskPending, lastDispatchedFor, pendingKeyForCorrelation, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention, recordPollSuccess, startReaper } from "./drivers/index.js";
+import { getDriver, listDrivers, openTab, normalizePrompt, askAndWait, askAndWaitOn, dispatchAsk, advanceAsk, isAskPending, lastDispatchedFor, pendingKeyForCorrelation, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention, recordPollSuccess, startReaper, startAdvancer } from "./drivers/index.js";
 import { loadEntry, loadAllEntries, writeEntry } from "./core/registry.js";
 import type { ProviderId } from "./types/conversation.js";
 
@@ -946,3 +946,6 @@ server.connect(transport);
 // 2026-08-08 (four-opinion design): poll-independent reaper — bounds the pending-ask
 // registry on a wall clock even when a client never polls again (abandoned asks).
 startReaper();
+// 2026-08-09 (user-requested): fast internal advance timer — finalizes finished asks
+// between client polls so the next provider_poll is a pure read of a completed ask.
+startAdvancer();

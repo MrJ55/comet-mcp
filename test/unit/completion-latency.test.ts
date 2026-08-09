@@ -267,3 +267,57 @@ test('ADR 0010: non-compliant model (no sentinel) → falls back to normal stabi
   assert.ok(first && !first.completed, 'no sentinel → not falsely completed (stability window holds)');
   assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending (fallback path, not finalized)');
 });
+
+// ---------------------------------------------------------------------------
+// Fast internal advance timer (2026-08-09, user-requested)
+// ---------------------------------------------------------------------------
+
+test('advancer: a finished ask finalizes via the timer sweep WITHOUT any client poll', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advancePendingAsks, isAskPending } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  const d = sentinelDriver('Timer-finalized answer.');
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  assert.ok(isAskPending(dispatched.idempotencyKey), 'pending after dispatch');
+  // sweep with now far enough past startTime to clear the age guard
+  const advanced = await advancePendingAsks(Date.now() + 5000);
+  assert.ok(advanced >= 1, 'timer advanced the pending ask');
+  assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized by the timer — no client poll needed');
+  // the response is durable + sentinel-free
+  const { eventsForCorrelation } = await import('../../dist/core/event-store.js');
+  const resp = [...eventsForCorrelation(dispatched.correlationId)].reverse().find((e) => e.type === 'response.received' || e.type === 'response.amended');
+  assert.ok(resp?.response?.poll.response.includes('Timer-finalized answer.'), 'response stored');
+  assert.ok(!resp?.response?.poll.response.includes('exact string'), 'sentinel instruction not stored');
+});
+
+test('advancer: age guard — a JUST-dispatched ask is skipped on the first sweep (dispatch→submit window)', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advancePendingAsks, isAskPending } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  const d = sentinelDriver('Fast answer.');
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  // sweep at NOW (no age added) — the ask is younger than ADVANCE_MIN_AGE_MS
+  const advanced = await advancePendingAsks(Date.now());
+  assert.equal(advanced, 0, 'too-young ask not advanced (would race driver.ask submission)');
+  assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending');
+});
+
+test('advancer: sweep is bounded per tick (thundering-herd guard)', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advancePendingAsks, ADVANCE_MAX_PER_TICK, listPendingAsks } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  // dispatch several asks so the cap binds
+  const keys: string[] = [];
+  for (let i = 0; i < ADVANCE_MAX_PER_TICK + 2; i++) {
+    const d = sentinelDriver('Answer ' + i);
+    const s = await d.open();
+    const disp = await dispatchAsk(d, s, 'Q' + i, { timeoutMs: 60000, completionMarker: true });
+    keys.push(disp.idempotencyKey);
+  }
+  const advanced = await advancePendingAsks(Date.now() + 5000);
+  assert.ok(advanced <= ADVANCE_MAX_PER_TICK, `per-tick cap respected (advanced ${advanced}, cap ${ADVANCE_MAX_PER_TICK})`);
+  // the rest remain pending for later sweeps
+  assert.ok(listPendingAsks().length >= 2, 'leftover asks pending for later sweeps');
+});
