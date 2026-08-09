@@ -30,7 +30,11 @@ hash), `src/core/relay-policy.ts` (R3 enforcement + markdown trust boundary),
 **Follow-up detection** (`src/drivers/index.ts`):
 - Captures old prose count/text before sending
 - Waits for NEW response (different text or more elements)
-- 8s completion-stability window (clock starts on FIRST reading)
+- Completion stability (2026-08-09, confidence-tiered): `completionConfidence` on
+  PollResult — authoritative (provider-native end-of-answer marker, message-scoped)
+  finalizes hash-confirmed & timer-free; heuristic (stop-absent w/ stop control,
+  Perplexity steps-only) 3s window; weak (response-present, no marker) 8s window.
+  Missing confidence ⇒ weak (fail-closed). `completionStability(windowMs)` is pure.
 
 **Prompt normalization**: strips bullet points, collapses newlines to spaces.
 

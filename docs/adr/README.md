@@ -10,4 +10,5 @@ Create one short decision record per material choice, such as the concurrency ce
 - [0006: Provider driver contract in entries (separate `.driver.json` files)](0006-provider-driver-contract-in-entries.md) — accepted 2026-08-08
 - [0007: Async-ask late reconciliation (soft expiry + poll-independent reaper)](0007-async-ask-late-reconciliation.md) — accepted 2026-08-08
 - [0008: P4 safe relay — envelope-hash approval binding, single-use CAS, and reconciliation](0008-p4-safe-relay-envelope-hash-approval-cas.md) — accepted 2026-08-09
+- [0009: Confidence-tiered completion finalization (latency fix)](0009-confidence-tiered-completion-finalization.md) — accepted 2026-08-09
 
