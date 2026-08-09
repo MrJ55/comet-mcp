@@ -46,8 +46,8 @@ function completedSource(content = SECRET): string {
 
 const BASE = { sourceCorrelationId: '', destination: DEST as any, attributionHeader: 'perplexity via relay to grok' };
 
-function approvedHash(corr: string, overrides: Record<string, unknown> = {}): string {
-  const p = prepareRelay({ ...BASE, sourceCorrelationId: corr, ...overrides });
+async function approvedHash(corr: string, overrides: Record<string, unknown> = {}): Promise<string> {
+  const p = await prepareRelay({ ...BASE, sourceCorrelationId: corr, ...overrides });
   assert.ok(p.ok, `prepare ok: ${(p as any).error ?? ''}`);
   const hash = (p as any).envelopeHash;
   const ap = approveRelay({ approvalHash: hash, correlationId: corr, envelopeId: (p as any).idempotencyKey });
@@ -84,7 +84,7 @@ test('R8: prepared with one policy → policy drifts between prepare and send �
   _resetForTests();
   const corr = completedSource();
   // prepare/approve with attributionHeader A
-  const hash = approvedHash(corr);
+  const hash = await approvedHash(corr);
   // ... at send time the policy drifted (attributionHeader B — same shape as
   // destination-disabled-since-prepare: policy changed after approval)
   const { deps: d, captured } = deps();
@@ -114,7 +114,7 @@ test('R8: timed-out at reconcile is non-terminal; late response reconciles (comp
 test('R8: expired approval + ambiguous destination response — BOTH fail closed, never auto-promote', async () => {
   _resetForTests();
   const corr = completedSource();
-  const p = prepareRelay({ ...BASE, sourceCorrelationId: corr });
+  const p = await prepareRelay({ ...BASE, sourceCorrelationId: corr });
   const hash = (p as any).envelopeHash;
   // approve with an ALREADY-expired expiry
   approveRelay({ approvalHash: hash, correlationId: corr, expiresAt: new Date(Date.now() - 1000).toISOString() });
@@ -137,7 +137,7 @@ test('R8: expired approval + ambiguous destination response — BOTH fail closed
 test('R8: surface-gone at send with a PENDING approval — approval NOT consumed, retry after fix works', async () => {
   _resetForTests();
   const corr = completedSource();
-  const hash = approvedHash(corr);
+  const hash = await approvedHash(corr);
   // surface gone at pre-flight
   const { deps: d1, captured: c1 } = deps({ preflightOk: false });
   const r1 = await sendRelay({ ...BASE, sourceCorrelationId: corr, approvalHash: hash }, d1);
@@ -157,7 +157,7 @@ test('R8: surface-gone at send with a PENDING approval — approval NOT consumed
 test('R8: surface-gone + approval still PENDING (never approved) → approval_failed first', async () => {
   _resetForTests();
   const corr = completedSource();
-  const p = prepareRelay({ ...BASE, sourceCorrelationId: corr });
+  const p = await prepareRelay({ ...BASE, sourceCorrelationId: corr });
   const hash = (p as any).envelopeHash;
   // no approve call — hash unknown to the store
   const { deps: d, captured } = deps({ preflightOk: false });
@@ -174,7 +174,7 @@ test('R8: surface-gone + approval still PENDING (never approved) → approval_fa
 test('R8: blocked send → approval consumed, reconciliation terminal blocked, NO auto-resend', async () => {
   _resetForTests();
   const corr = completedSource();
-  const hash = approvedHash(corr);
+  const hash = await approvedHash(corr);
   const { deps: d, captured } = deps({ sendOk: false });
   const r = await sendRelay({ ...BASE, sourceCorrelationId: corr, approvalHash: hash }, d);
   assert.equal(r.ok, false);
@@ -216,7 +216,7 @@ test('R8: full/redacted/none all exercise the whole chain (prepare→approve→s
   for (const cpm of ['full', 'redacted', 'none']) {
     _resetForTests();
     const corr = completedSource();
-    const hash = approvedHash(corr, { contentPersistenceMode: cpm });
+    const hash = await approvedHash(corr, { contentPersistenceMode: cpm });
     const { deps: d, captured } = deps();
     const r = await sendRelay({ ...BASE, sourceCorrelationId: corr, approvalHash: hash, contentPersistenceMode: cpm }, d);
     assert.equal(r.ok, true, `${cpm}: send ok`);
@@ -234,7 +234,7 @@ test('R8: persistence mode carried on every RELAY event row', async () => {
   for (const cpm of ['full', 'redacted', 'none']) {
     _resetForTests();
     const corr = completedSource();
-    const hash = approvedHash(corr, { contentPersistenceMode: cpm });
+    const hash = await approvedHash(corr, { contentPersistenceMode: cpm });
     const { deps: d } = deps();
     const r = await sendRelay({ ...BASE, sourceCorrelationId: corr, approvalHash: hash, contentPersistenceMode: cpm }, d);
     assert.equal(r.ok, true, `${cpm}: send ok`);
@@ -261,7 +261,7 @@ test('R8: NO LEAK — relay events never duplicate content under redacted/none; 
   for (const cpm of ['redacted', 'none']) {
     _resetForTests();
     const corr = completedSource();
-    const hash = approvedHash(corr, { contentPersistenceMode: cpm });
+    const hash = await approvedHash(corr, { contentPersistenceMode: cpm });
     const { deps: d } = deps({ sendOk: false }); // include a BLOCKED escalation path
     await sendRelay({ ...BASE, sourceCorrelationId: corr, approvalHash: hash, contentPersistenceMode: cpm }, d);
     const raw = readFileSync(join(dataDir, 'event-log.jsonl'), 'utf8');
@@ -281,7 +281,7 @@ test('R8: NO LEAK — relay events never duplicate content under redacted/none; 
 test('R8: full mode DOES exercise the chain with relay rows carrying full (grok trap — modes must differ)', async () => {
   _resetForTests();
   const corr = completedSource();
-  const hash = approvedHash(corr, { contentPersistenceMode: 'full' });
+  const hash = await approvedHash(corr, { contentPersistenceMode: 'full' });
   const { deps: d } = deps();
   const r = await sendRelay({ ...BASE, sourceCorrelationId: corr, approvalHash: hash, contentPersistenceMode: 'full' }, d);
   assert.equal(r.ok, true);
@@ -302,8 +302,8 @@ test('R8: full mode DOES exercise the chain with relay rows carrying full (grok 
 test('R8: same source+destination+policy → same approval hash across prepare AND send', async () => {
   _resetForTests();
   const corr = completedSource();
-  const p1 = prepareRelay({ ...BASE, sourceCorrelationId: corr });
-  const p2 = prepareRelay({ ...BASE, sourceCorrelationId: corr });
+  const p1 = await prepareRelay({ ...BASE, sourceCorrelationId: corr });
+  const p2 = await prepareRelay({ ...BASE, sourceCorrelationId: corr });
   assert.ok(p1.ok && p2.ok);
   assert.equal((p1 as any).envelopeHash, (p2 as any).envelopeHash, 're-prepare stable');
   // canonical form matches the hash input exactly

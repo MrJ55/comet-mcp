@@ -182,12 +182,20 @@ export function extractSteps(bodyText: string): { steps: string[]; currentStep: 
  * Determine Perplexity status from page signals. Order matters — see the inline
  * comments (completion signals must win over working-text, because the answer
  * text itself often contains words like "Working"/"Searching"/"Analyzing").
+ *
+ * 2026-08-09 latency fix: returns per-branch completion confidence.
+ *  - 'authoritative': end-of-answer markers — "Ask a follow-up" (rendered only
+ *    when the answer is fully written) and "Finished". These bypass the
+ *    stability window (hash-confirmed at the gate).
+ *  - 'heuristic': "N steps completed" ALONE (step-phase marker — may precede
+ *    final synthesis) or stop-absent-with-content. Short window.
+ *  - 'weak': response present with no marker and no stop control. Full 8s.
  */
 export function determineStatus(signals: {
   hasActiveStopButton: boolean;
   hasLoadingSpinner: boolean;
   bodyText: string;
-}): 'idle' | 'working' | 'completed' {
+}): { state: 'idle' | 'working' | 'completed'; completionConfidence?: 'authoritative' | 'heuristic' | 'weak' } {
   const { hasActiveStopButton, hasLoadingSpinner, bodyText: body } = signals;
   const hasStepsCompleted = /\d+ steps? completed/i.test(body);
   const hasFinishedMarker = body.includes('Finished') && !hasActiveStopButton;
@@ -195,12 +203,15 @@ export function determineStatus(signals: {
   const hasAskFollowUp = body.includes('Ask a follow-up');
   const hasWorkingText = WORKING_PATTERNS.some((p) => body.includes(p));
 
-  if (hasActiveStopButton || hasLoadingSpinner) return 'working';
-  if (hasStepsCompleted || hasFinishedMarker) return 'completed';
-  if (hasAskFollowUp && !hasActiveStopButton) return 'completed'; // "Ask a follow-up" appears only when done
-  if (hasReviewedSources && !hasWorkingText && hasAskFollowUp) return 'completed';
-  if (hasWorkingText) return 'working';
-  return 'idle';
+  if (hasActiveStopButton || hasLoadingSpinner) return { state: 'working' };
+  // end-of-answer markers → authoritative
+  if (hasFinishedMarker) return { state: 'completed', completionConfidence: 'authoritative' };
+  if (hasAskFollowUp && !hasActiveStopButton) return { state: 'completed', completionConfidence: 'authoritative' }; // "Ask a follow-up" appears only when done
+  if (hasReviewedSources && !hasWorkingText && hasAskFollowUp) return { state: 'completed', completionConfidence: 'authoritative' };
+  // step-phase marker alone → heuristic (may precede final synthesis)
+  if (hasStepsCompleted) return { state: 'completed', completionConfidence: 'heuristic' };
+  if (hasWorkingText) return { state: 'working' };
+  return { state: 'idle' };
 }
 
 // ---------------------------------------------------------------------------
@@ -214,19 +225,27 @@ export function determineStatus(signals: {
 export const GROK_TIMING_LINE = /^(?:Work(?:ing|ed) for \d+s[\s\n]*)+/;
 
 /**
- * Determine Grok status: "Working for Xs" → streaming; "Worked for Xs" (or
- * working indicator gone with non-empty message) → completed; else idle.
+ * Determine Grok status — MESSAGE-SCOPED (2026-08-09 latency fix). The timing
+ * line is rendered INSIDE each assistant message, so the regex runs on the LAST
+ * message's text (the same node extractGrokResponse uses), never on bodyText —
+ * a previous turn's "Worked for Xs" must not mark the current turn complete.
+ *
+ * Returns state + completion confidence:
+ *  - 'authoritative' when the LAST message carries the past-tense "Worked for
+ *    Xs" line — Grok renders it only when that message's answer is done.
+ *  - 'weak' when completed only via the non-empty-message fallback.
  */
 export function determineGrokStatus(signals: {
-  bodyText: string;
-  lastMessageLen: number;
-}): 'idle' | 'streaming' | 'completed' {
-  const { bodyText, lastMessageLen } = signals;
-  const hasWorking = /Working for \d+s/i.test(bodyText);
-  const hasWorked = /Worked for \d+s/i.test(bodyText);
-  if (hasWorking) return 'streaming';
-  if (hasWorked || lastMessageLen > 0) return 'completed';
-  return 'idle';
+  lastMessageText: string;
+}): { state: 'idle' | 'streaming' | 'completed'; completionConfidence?: 'authoritative' | 'weak' } {
+  const { lastMessageText } = signals;
+  // message-scoped: only the last assistant message's own timing line counts
+  const hasWorking = /^Working for \d+s/i.test(lastMessageText);
+  const hasWorked = /^Worked for \d+s/i.test(lastMessageText);
+  if (hasWorking) return { state: 'streaming' };
+  if (hasWorked) return { state: 'completed', completionConfidence: 'authoritative' };
+  if (lastMessageText.length > 0) return { state: 'completed', completionConfidence: 'weak' };
+  return { state: 'idle' };
 }
 
 /**

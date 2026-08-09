@@ -285,14 +285,14 @@ export class PerplexityDriver implements ChatDriver {
       bodyText,
     });
     const { steps, currentStep } = extractSteps(bodyText);
-    const extraction = status === 'completed' ? extractResponse(value.proseTexts ?? []) : null;
+    const extraction = status.state === 'completed' ? extractResponse(value.proseTexts ?? []) : null;
     // P2 markdown: convert the LAST prose container's innerHTML when completed
-    const markdown = status === 'completed' && (value.proseHtmls?.length ?? 0) > 0
+    const markdown = status.state === 'completed' && (value.proseHtmls?.length ?? 0) > 0
       ? htmlToMarkdown('perplexity', value.proseHtmls![value.proseHtmls!.length - 1])
       : null;
 
     return {
-      state: status as ProviderState,
+      state: status.state as ProviderState,
       steps,
       currentStep,
       response: extraction?.response ?? '',
@@ -300,6 +300,8 @@ export class PerplexityDriver implements ChatDriver {
       hasStopButton: value.hasActiveStopButton === true,
       agentBrowsingUrl,
       contentHash: extraction ? simpleHash(extraction.response) : undefined,
+      // 2026-08-09 latency fix: follow-up/Finished ⇒ authoritative; steps-only ⇒ heuristic
+      completionConfidence: status.completionConfidence,
       extraction: extraction
         ? {
             joinedProseBlocks: extraction.joinedProseBlocks,

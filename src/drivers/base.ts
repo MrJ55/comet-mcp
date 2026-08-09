@@ -380,24 +380,36 @@ export abstract class BaseChatDriver implements ChatDriver {
    * Determine poll state from the probe. P6 gate: `completed` requires non-empty
    * response text; an empty container after generation degrades instead of
    * reporting a silent empty response.
+   *
+   * 2026-08-09 latency fix: returns confidence too — stop-absent on providers
+   * WITH a real stop button ⇒ 'heuristic' (short window); response-present with
+   * no stop control at all ⇒ 'weak' (full 8s window).
    */
-  protected determineState(driver: ProviderDriver | null, probe: PollProbe): ProviderState {
+  protected determineState(driver: ProviderDriver | null, probe: PollProbe): { state: ProviderState; completionConfidence?: 'heuristic' | 'weak' } {
     const body = (probe.bodyText ?? '').toLowerCase();
     const login = driver?.signals?.login ?? [];
     const blocked = driver?.signals?.blocked ?? [];
-    if (login.some((p) => body.includes(p.toLowerCase()))) return 'login_required';
-    if (blocked.some((p) => body.includes(p.toLowerCase()))) return 'blocked';
+    if (login.some((p) => body.includes(p.toLowerCase()))) return { state: 'login_required' };
+    if (blocked.some((p) => body.includes(p.toLowerCase()))) return { state: 'blocked' };
 
     const working = probe.hasStopButton === true;
-    if (working) return 'streaming';
+    if (working) return { state: 'streaming' };
 
     // working signal absent — generation either finished or failed
-    if ((probe.texts?.length ?? 0) > 0) return 'completed';
-    if (ERROR_PATTERNS.some((p) => body.includes(p))) return 'degraded';
+    if ((probe.texts?.length ?? 0) > 0) {
+      // a stop/working control EXISTS on this provider entry (base P6:
+      // gemini/chatgpt/claude all define signals.working) and is now absent →
+      // heuristic (short window). No working signal defined at all → weak.
+      const hasWorkingSignal = !!driver?.signals?.working;
+      return hasWorkingSignal
+        ? { state: 'completed', completionConfidence: 'heuristic' }
+        : { state: 'completed', completionConfidence: 'weak' };
+    }
+    if (ERROR_PATTERNS.some((p) => body.includes(p))) return { state: 'degraded' };
     // response container exists but is empty (or missing after a completed ask) —
     // never a silent empty completion (P6 gate)
-    if (probe.hasResponseContainer === true) return 'degraded';
-    return 'idle';
+    if (probe.hasResponseContainer === true) return { state: 'degraded' };
+    return { state: 'idle' };
   }
 
   /** Live login check (body-text patterns). */
@@ -417,7 +429,8 @@ export abstract class BaseChatDriver implements ChatDriver {
     const raw = await handle.safeEvaluate(this.buildPollScript(driver, responseSel));
     const probe = ((raw?.result?.value ?? {}) as PollProbe);
 
-    const state = this.determineState(driver, probe);
+    const decided = this.determineState(driver, probe);
+    const state = decided.state;
     const extraction = state === 'completed' && (probe.texts?.length ?? 0) > 0
       ? extractAssistantTurn(probe.texts ?? [], {
           preferLast: driver?.extraction?.preferLast,
@@ -438,6 +451,8 @@ export abstract class BaseChatDriver implements ChatDriver {
       agentBrowsingUrl: await this.agentBrowsingUrl(),
       messageId: probe.messageId || undefined,
       contentHash: extraction ? simpleHash(extraction.response) : undefined,
+      // 2026-08-09 latency fix: stop-absent on providers with a working signal ⇒ heuristic
+      completionConfidence: decided.completionConfidence,
       extraction: extraction
         ? {
             joinedProseBlocks: extraction.joinedProseBlocks,

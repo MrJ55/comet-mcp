@@ -75,6 +75,29 @@ const CIRCUIT_COOLDOWN_MS = 30000;  // half-open retry after cooldown
  */
 export const MIN_COMPLETION_STABILITY_MS = 8000;
 
+/**
+ * P4 latency fix (2026-08-09, consult-validated): completion windows per
+ * confidence tier. authoritative needs NO wall clock (hash-confirmed at the
+ * gate); heuristic (stop-absent on providers with real stop buttons, Perplexity
+ * steps-only) uses a short window; weak (response-present, no marker/stop)
+ * keeps the full anti-truncation window. Entry-level override wins:
+ * entry.signals.completed.windowMs ?? this map.
+ */
+export const CONFIDENCE_WINDOWS: Record<'authoritative' | 'heuristic' | 'weak', number> = {
+  authoritative: 0,
+  heuristic: 3000,
+  weak: MIN_COMPLETION_STABILITY_MS,
+};
+
+/** Resolve the stability window for a poll: entry override > confidence map > 8s. */
+export function windowForPoll(
+  poll: import('../types/provider.js').PollResult,
+  entryWindowMs?: number,
+): number {
+  const confidence = poll.completionConfidence ?? 'weak';
+  return entryWindowMs ?? CONFIDENCE_WINDOWS[confidence] ?? MIN_COMPLETION_STABILITY_MS;
+}
+
 interface TabCircuit {
   failures: number;
   openUntil: number; // epoch ms; 0 = closed
@@ -144,6 +167,7 @@ export function completionStability(
   prevHash: string | null,
   stableSince: number | null,
   now: number,
+  windowMs: number = MIN_COMPLETION_STABILITY_MS,
 ): { complete: boolean; stableSince: number | null } {
   const sameAsPrev = hash !== null && (prevHash === null || hash === prevHash);
   if (!sameAsPrev) {
@@ -151,7 +175,7 @@ export function completionStability(
     return { complete: false, stableSince: null };
   }
   const since = stableSince ?? now; // first reading of this hash starts the clock
-  const held = now - since >= MIN_COMPLETION_STABILITY_MS;
+  const held = now - since >= windowMs;
   return { complete: held, stableSince: since };
 }
 
@@ -838,8 +862,21 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   }
 
   if (poll.state === 'completed' && p.sawNewResponse) {
-    const { complete, stableSince } = completionStability(hash, p.prevHash, p.stableSince, Date.now());
-    p.stableSince = stableSince;
+    // P4 latency fix (2026-08-09, consult-validated): authoritative completion
+    // (provider-native end-of-answer marker, message-scoped) is hash-confirmed
+    // and timer-free — no wall clock. heuristic/weak keep the stability window
+    // (entry override > confidence map > 8s). Missing confidence ⇒ weak.
+    const confidence = poll.completionConfidence ?? 'weak';
+    let complete: boolean;
+    if (confidence === 'authoritative') {
+      // marker + same content as last poll (or cold start: no prior hash) ⇒ done
+      complete = p.prevHash === null || hash === p.prevHash;
+    } else {
+      const windowMs = windowForPoll(poll);
+      const stability = completionStability(hash, p.prevHash, p.stableSince, Date.now(), windowMs);
+      p.stableSince = stability.stableSince;
+      complete = stability.complete;
+    }
     if (complete) {
       pendingAsks.delete(key);
       const wasLate = p.phase === 'watching';
@@ -942,4 +979,17 @@ export function isAskPending(key: string): boolean {
 /** List pending ask keys (diagnostics). */
 export function listPendingAsks(): string[] {
   return [...pendingAsks.keys()];
+}
+
+/**
+ * 2026-08-09 latency fix: the pending-ask KEY for a correlation, or '' when none.
+ * Keys are envelope idempotencyKeys; this scans the pending registry by
+ * correlationId so relay_prepare can auto-advance the source ask without the
+ * client round-trip.
+ */
+export function pendingKeyForCorrelation(correlationId: string): string {
+  for (const [key, p] of pendingAsks) {
+    if (p.envelope.correlationId === correlationId) return key;
+  }
+  return '';
 }

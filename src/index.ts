@@ -24,7 +24,7 @@ import {
 import { cometClient } from "./cdp-client.js";
 import { tabRegistry } from "./tab-registry.js";
 import { sessionPool } from "./cdp-pool.js";
-import { getDriver, listDrivers, openTab, normalizePrompt, askAndWait, askAndWaitOn, dispatchAsk, advanceAsk, isAskPending, lastDispatchedFor, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention, recordPollSuccess, startReaper } from "./drivers/index.js";
+import { getDriver, listDrivers, openTab, normalizePrompt, askAndWait, askAndWaitOn, dispatchAsk, advanceAsk, isAskPending, lastDispatchedFor, pendingKeyForCorrelation, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention, recordPollSuccess, startReaper } from "./drivers/index.js";
 import { loadEntry, loadAllEntries, writeEntry } from "./core/registry.js";
 import type { ProviderId } from "./types/conversation.js";
 
@@ -762,16 +762,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!sourceCorrelationId) return { content: [{ type: "text", text: "Error: sourceCorrelationId required (the completed source ask's correlationId)" }], isError: true };
         if (!knownProvider(destination)) return { content: [{ type: "text", text: `Unknown destination: ${destination} (have: ${knownProviders().join(', ')})` }], isError: true };
         const { prepareRelay } = await import('./core/relay.js');
-        const result = prepareRelay({
-          sourceCorrelationId,
-          destination: destination as ProviderId,
-          attributionHeader: args?.attributionHeader ? String(args.attributionHeader) : undefined,
-          contentSizeLimitBytes: args?.contentSizeLimitBytes as number | undefined,
-          deadlineMs: args?.deadlineMs as number | undefined,
-          maxRelaysPerCorrelation: args?.maxRelaysPerCorrelation as number | undefined,
-          rawMarkdown: args?.rawMarkdown as boolean | undefined,
-          contentPersistenceMode: args?.contentPersistenceMode as any,
-        });
+        // 2026-08-09 latency fix: bounded auto-advance of a PENDING source ask so
+        // a just-finished source is relayable immediately (≤3 advanceAsk steps /
+        // ~10s wall; source only, never the destination).
+        const result = await prepareRelay(
+          {
+            sourceCorrelationId,
+            destination: destination as ProviderId,
+            attributionHeader: args?.attributionHeader ? String(args.attributionHeader) : undefined,
+            contentSizeLimitBytes: args?.contentSizeLimitBytes as number | undefined,
+            deadlineMs: args?.deadlineMs as number | undefined,
+            maxRelaysPerCorrelation: args?.maxRelaysPerCorrelation as number | undefined,
+            rawMarkdown: args?.rawMarkdown as boolean | undefined,
+            contentPersistenceMode: args?.contentPersistenceMode as any,
+          },
+          {
+            // drive the pending SOURCE ask toward terminal-success (source only)
+            isSourcePending: () => {
+              const key = pendingKeyForCorrelation(sourceCorrelationId);
+              return !!key && isAskPending(key);
+            },
+            advanceSource: async () => {
+              const key = pendingKeyForCorrelation(sourceCorrelationId);
+              if (key && isAskPending(key)) await advanceAsk(key);
+            },
+          },
+        );
         if (!result.ok) {
           return { content: [{ type: "text", text: `relay_prepare blocked: ${result.error}` }], isError: true };
         }

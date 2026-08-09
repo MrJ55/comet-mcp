@@ -33,18 +33,28 @@ test('Grok: empty messages produce empty response with no flags', () => {
   assert.equal(joinedProseBlocks, false);
 });
 
-test('Grok status: "Working for Xs" → streaming', () => {
-  assert.equal(determineGrokStatus({ bodyText: 'Working for 3s', lastMessageLen: 0 }), 'streaming');
+test('Grok status: "Working for Xs" in LAST message → streaming', () => {
+  assert.equal(determineGrokStatus({ lastMessageText: 'Working for 3s' }).state, 'streaming');
 });
 
-test('Grok status: "Worked for Xs" → completed', () => {
-  assert.equal(determineGrokStatus({ bodyText: 'Worked for 3s\n\nAnswer', lastMessageLen: 20 }), 'completed');
+test('Grok status: "Worked for Xs" in LAST message → completed AUTHORITATIVE (2026-08-09 latency fix)', () => {
+  const r = determineGrokStatus({ lastMessageText: 'Worked for 3s\n\nAnswer' });
+  assert.equal(r.state, 'completed');
+  assert.equal(r.completionConfidence, 'authoritative');
 });
 
-test('Grok status: message present without timing line → completed', () => {
-  assert.equal(determineGrokStatus({ bodyText: 'something', lastMessageLen: 10 }), 'completed');
+test('Grok status: message without timing line → completed WEAK (fallback)', () => {
+  const r = determineGrokStatus({ lastMessageText: 'something' });
+  assert.equal(r.state, 'completed');
+  assert.equal(r.completionConfidence, 'weak');
+});
+
+test('Grok status: MESSAGE-SCOPED — old "Worked for Xs" in a PREVIOUS turn must not mark the current turn authoritative', () => {
+  // previous turn complete, current turn mid-stream: only the LAST message counts
+  const r = determineGrokStatus({ lastMessageText: 'Working for 5s' });
+  assert.equal(r.state, 'streaming', 'current turn still streaming despite older Worked line (now message-scoped)');
 });
 
 test('Grok status: nothing happening → idle', () => {
-  assert.equal(determineGrokStatus({ bodyText: '', lastMessageLen: 0 }), 'idle');
+  assert.equal(determineGrokStatus({ lastMessageText: '' }).state, 'idle');
 });

@@ -78,10 +78,10 @@ test('R4: findRelaySource — no events → null', () => {
   assert.equal(findRelaySource('no-such-correlation'), null);
 });
 
-test('R4: prepareRelay — builds envelope + hash, approvalRequired, evaluation surfaced', () => {
+test('R4: prepareRelay — builds envelope + hash, approvalRequired, evaluation surfaced', async () => {
   _resetForTests();
   const corr = completedSource();
-  const result = prepareRelay({
+  const result = await prepareRelay({
     sourceCorrelationId: corr,
     destination: 'grok',
     attributionHeader: 'perplexity via relay to grok',
@@ -105,11 +105,11 @@ test('R4: prepareRelay — builds envelope + hash, approvalRequired, evaluation 
   assert.ok(eventsForCorrelation(corr).some((e) => e.type === 'envelope.created'));
 });
 
-test('R4: prepareRelay — same source+destination+policy → same envelopeHash (re-prepare stable)', () => {
+test('R4: prepareRelay — same source+destination+policy → same envelopeHash (re-prepare stable)', async () => {
   _resetForTests();
   const corr = completedSource();
-  const a = prepareRelay({ sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr' });
-  const b = prepareRelay({ sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr' });
+  const a = await prepareRelay({ sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr' });
+  const b = await prepareRelay({ sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr' });
   assert.ok(a.ok && b.ok);
   const ra = a as Extract<typeof a, { ok: true }>;
   const rb = b as Extract<typeof b, { ok: true }>;
@@ -118,54 +118,54 @@ test('R4: prepareRelay — same source+destination+policy → same envelopeHash 
   assert.equal(ra.canonical, rb.canonical);
 });
 
-test('R4: prepareRelay — different destination → different hash (approval binds destination)', () => {
+test('R4: prepareRelay — different destination → different hash (approval binds destination)', async () => {
   _resetForTests();
   const corr = completedSource();
-  const a = prepareRelay({ sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr' });
-  const b = prepareRelay({ sourceCorrelationId: corr, destination: 'claude', attributionHeader: 'hdr' });
+  const a = await prepareRelay({ sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr' });
+  const b = await prepareRelay({ sourceCorrelationId: corr, destination: 'claude', attributionHeader: 'hdr' });
   assert.ok(a.ok && b.ok);
   assert.notEqual((a as any).envelopeHash, (b as any).envelopeHash);
 });
 
-test('R4: prepareRelay — attributionHeader mandatory, fail closed (R3)', () => {
+test('R4: prepareRelay — attributionHeader mandatory, fail closed (R3)', async () => {
   _resetForTests();
   const corr = completedSource();
-  const result = prepareRelay({ sourceCorrelationId: corr, destination: 'grok' });
+  const result = await prepareRelay({ sourceCorrelationId: corr, destination: 'grok' });
   assert.ok(!result.ok);
   assert.equal((result as any).policyReason, 'attribution_missing');
 });
 
-test('R4: prepareRelay — content size limit enforced eagerly', () => {
+test('R4: prepareRelay — content size limit enforced eagerly', async () => {
   _resetForTests();
   const corr = completedSource();
-  const result = prepareRelay({
+  const result = await prepareRelay({
     sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr', contentSizeLimitBytes: 10,
   });
   assert.ok(!result.ok);
   assert.equal((result as any).policyReason, 'content_too_large');
 });
 
-test('R4: prepareRelay — expired deadline blocked eagerly', () => {
+test('R4: prepareRelay — expired deadline blocked eagerly', async () => {
   _resetForTests();
   const corr = completedSource();
-  const result = prepareRelay({
+  const result = await prepareRelay({
     sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr', deadlineMs: Date.now() - 1000,
   });
   assert.ok(!result.ok);
   assert.equal((result as any).policyReason, 'deadline_expired');
 });
 
-test('R4: prepareRelay — no terminal-success source → clear error, no crash', () => {
+test('R4: prepareRelay — no terminal-success source → clear error, no crash', async () => {
   _resetForTests();
-  const result = prepareRelay({ sourceCorrelationId: 'missing', destination: 'grok', attributionHeader: 'h' });
+  const result = await prepareRelay({ sourceCorrelationId: 'missing', destination: 'grok', attributionHeader: 'h' });
   assert.ok(!result.ok);
   assert.match((result as any).error, /no terminal-success source/);
 });
 
-test('R4: prepareRelay — rawMarkdown opt-in flips markdownAction to passthrough', () => {
+test('R4: prepareRelay — rawMarkdown opt-in flips markdownAction to passthrough', async () => {
   _resetForTests();
   const corr = completedSource();
-  const r = prepareRelay({
+  const r = await prepareRelay({
     sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr', rawMarkdown: true,
   });
   assert.ok(r.ok);
@@ -178,11 +178,68 @@ test('R4: NO-DESTINATION-CONTACT — prepare is pure in-memory + event-store onl
   // monkey-patch impossible on ESM; instead assert the contract: prepareRelay is sync
   // and returns without any provider/driver import — it cannot have contacted a tab.
   const start = Date.now();
-  const r = prepareRelay({ sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr' });
+  const r = await prepareRelay({ sourceCorrelationId: corr, destination: 'grok', attributionHeader: 'hdr' });
   assert.ok(r.ok);
   assert.ok(Date.now() - start < 1000, 'prepare must not do network/tab work');
   // no response file written by prepare (that is relay_send's job)
   const { readResponseChunk } = drv;
   const probe = readResponseChunk('grok-nonexistent');
   assert.equal(probe.ok, false);
+});
+
+test('R4 (latency fix fold #4): prepareRelay auto-advances a PENDING source ask to terminal-success', async () => {
+  _resetForTests();
+  // source ask recorded as in-flight (no response yet)
+  const env = makeEnvelope('perplexity', 'pending-src-key');
+  recordEnvelopeCreated(env);
+  recordSendEvent(env, 'send.accepted');
+  // no response.received yet → not a terminal-success source
+  assert.equal(findRelaySource(env.correlationId), null);
+  // simulate the async-ask registry: pending, completes on the 2nd advance
+  let advances = 0;
+  const deps = {
+    isSourcePending: () => advances < 2,
+    advanceSource: async () => {
+      advances++;
+      if (advances >= 2) {
+        // the ask completes → a terminal-success response is recorded
+        recordResponseReceived(env, 'perplexity', {
+          messageId: 'pm-final', contentHash: 'ch-final', cursor: 'cur',
+          state: 'completed', text: 'the finished answer', steps: ['s'],
+        }, 'tab-1');
+        recordDeliveryReceipt({
+          receiptId: 'rct-final', envelopeId: env.idempotencyKey, correlationId: env.correlationId,
+          idempotencyKey: env.idempotencyKey, status: 'completed', recordedAt: new Date().toISOString(),
+          contentHash: 'ch-final', providerMessageId: 'pm-final',
+        });
+      }
+    },
+  };
+  const result = await prepareRelay(
+    { sourceCorrelationId: env.correlationId, destination: 'grok', attributionHeader: 'hdr' },
+    deps as any,
+  );
+  assert.ok(result.ok, 'auto-advance brought the source to terminal-success');
+  assert.equal(advances, 2, 'advanced exactly until terminal');
+  const r = result as Extract<typeof result, { ok: true }>;
+  assert.ok(r.envelope.content.includes('finished answer'), 'relay uses the advanced source content');
+});
+
+test('R4 (latency fix fold #4): auto-advance is BOUNDED — never-completing source → error with advancedSteps', async () => {
+  _resetForTests();
+  const env = makeEnvelope('perplexity', 'stuck-src-key');
+  recordEnvelopeCreated(env);
+  recordSendEvent(env, 'send.accepted');
+  let advances = 0;
+  const deps = {
+    isSourcePending: () => true, // never completes
+    advanceSource: async () => { advances++; },
+  };
+  const result = await prepareRelay(
+    { sourceCorrelationId: env.correlationId, destination: 'grok', attributionHeader: 'hdr' },
+    deps as any,
+  );
+  assert.ok(!result.ok, 'bounded: gives up after the step budget');
+  assert.ok(advances <= 3, 'never more than MAX_RELAY_ADVANCE_STEPS advances');
+  assert.equal((result as any).advancedSteps, advances, 'error payload reports advancedSteps');
 });

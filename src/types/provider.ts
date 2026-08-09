@@ -59,6 +59,18 @@ export interface PollResult {
     truncatedFromEnd: boolean;    // Perplexity fix: slice(-8000), keep newest
     dedupedByContainment: boolean;
   };
+  /**
+   * P4 latency fix (2026-08-09, consult-validated): HOW confidently the driver
+   * knows this poll is COMPLETE, per-marker and message-scoped. Absent ⇒ the
+   * gate treats it as 'weak' (full stability window) — fail-closed.
+   *  - 'authoritative': a provider-native, end-of-answer marker was observed in
+   *    the SAME message node the response was extracted from (Grok "Worked for
+   *    Xs", Perplexity "Ask a follow-up"/"Finished"). No wall-clock needed.
+   *  - 'heuristic': stop-absent + content present (providers with real stop
+   *    buttons), or Perplexity "N steps completed" alone. Short window.
+   *  - 'weak': response-present with no marker and no stop control. Full 8s.
+   */
+  completionConfidence?: 'authoritative' | 'heuristic' | 'weak';
 }
 
 /** One CDP session bound to one provider tab, with per-tab state. */

@@ -187,8 +187,10 @@ export class GrokDriver implements ChatDriver {
     };
     const bodyText = value.bodyText ?? '';
     const messages = value.assistantMessages ?? [];
+    const lastMessageText = messages[messages.length - 1] ?? '';
 
-    const state = determineGrokStatus({ bodyText, lastMessageLen: messages[messages.length - 1]?.length ?? 0 });
+    const status = determineGrokStatus({ lastMessageText });
+    const state = status.state;
     const extraction = state === 'completed' ? extractGrokResponse(messages) : null;
     // P2 markdown: convert the LAST assistant-message's innerHTML when completed
     const markdown = state === 'completed' && (value.assistantHtmls?.length ?? 0) > 0
@@ -205,6 +207,8 @@ export class GrokDriver implements ChatDriver {
       hasStopButton: false,
       agentBrowsingUrl: '',
       contentHash: extraction ? simpleHash(extraction.response) : undefined,
+      // 2026-08-09 latency fix: message-scoped "Worked for Xs" ⇒ authoritative
+      completionConfidence: status.completionConfidence,
       extraction: extraction
         ? {
             joinedProseBlocks: extraction.joinedProseBlocks,

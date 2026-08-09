@@ -107,6 +107,8 @@ export interface RelayPrepareError {
   /** Set when policy evaluation failed — the reason is machine-checkable. */
   policyReason?: RelayPolicyEvaluation['reason'];
   evaluation?: RelayPolicyEvaluation;
+  /** 2026-08-09 latency fix: how many source-advance steps were attempted before giving up. */
+  advancedSteps?: number;
 }
 
 /** Relay policy defaults for a prepared envelope (R3 defaults + mandatory enablement). */
@@ -127,10 +129,37 @@ function buildRelayControls(input: RelayPrepareInput): RelayControls {
 /**
  * R4: prepare a relay. Selects the terminal-success source, builds + canonicalizes
  * + hashes the envelope, runs eager policy checks. NEVER contacts the destination.
+ *
+ * 2026-08-09 latency fix (consult fold #4): when `deps.advanceSource` is provided
+ * (the tool layer wires it to advanceAsk), a PENDING source ask is advanced up to
+ * MAX_RELAY_ADVANCE_STEPS times, bounded by a wall-clock budget, so a just-finished
+ * source is relayable immediately without a client round-trip. Only the SOURCE is
+ * ever advanced — never the destination, no new turns opened.
  */
-export function prepareRelay(input: RelayPrepareInput): RelayPrepareResult | RelayPrepareError {
+export async function prepareRelay(
+  input: RelayPrepareInput,
+  deps: { advanceSource?: () => Promise<void>; isSourcePending?: () => boolean } = {},
+): Promise<RelayPrepareResult | RelayPrepareError> {
+  // bounded auto-advance of a pending source ask (consult fold #4)
+  let advancedSteps = 0;
+  if (deps.advanceSource && deps.isSourcePending && !findRelaySource(input.sourceCorrelationId)) {
+    const budget = { wallStart: Date.now() };
+    const MAX_STEPS = 3;
+    const WALL_BUDGET_MS = 10_000;
+    while (
+      deps.isSourcePending() &&
+      !findRelaySource(input.sourceCorrelationId) &&
+      advancedSteps < MAX_STEPS &&
+      Date.now() - budget.wallStart < WALL_BUDGET_MS
+    ) {
+      await deps.advanceSource();
+      advancedSteps++;
+    }
+  }
   const built = buildRelayEnvelope(input);
-  if (!built.ok) return { ok: false, error: built.error, policyReason: built.policyReason };
+  if (!built.ok) {
+    return { ok: false, error: built.error, policyReason: built.policyReason, advancedSteps };
+  }
   const { envelope, canonical, envelopeHash, evaluation } = built;
 
   // Durable trail anchor: envelope.created with the relay's persistence mode.

@@ -38,8 +38,8 @@ function completedSource(): string {
 
 const BASE_INPUT = { sourceCorrelationId: '', destination: DEST as any, attributionHeader: 'perplexity via relay to grok' };
 
-function preparedApprovedHash(corr: string): string {
-  const p = prepareRelay({ ...BASE_INPUT, sourceCorrelationId: corr });
+async function preparedApprovedHash(corr: string): Promise<string> {
+  const p = await prepareRelay({ ...BASE_INPUT, sourceCorrelationId: corr });
   assert.ok(p.ok, 'prepare ok');
   const hash = (p as any).envelopeHash;
   const ap = approveRelay({ approvalHash: hash, correlationId: corr, envelopeId: (p as any).idempotencyKey });
@@ -65,7 +65,7 @@ function fakeDeps(overrides: { preflightOk?: boolean; sendOk?: boolean; captureW
 test('R6: happy path — hash binding ok, CAS consumed, wire sent with attribution header, receipt recorded', async () => {
   _resetForTests();
   const corr = completedSource();
-  const hash = preparedApprovedHash(corr);
+  const hash = await preparedApprovedHash(corr);
   const { deps, captured } = fakeDeps();
   const result = await sendRelay({ ...BASE_INPUT, sourceCorrelationId: corr, approvalHash: hash }, deps);
   assert.equal(result.ok, true);
@@ -87,7 +87,7 @@ test('R6: happy path — hash binding ok, CAS consumed, wire sent with attributi
 test('R6: hash binding — altered destination/content/policy → mismatch, approval NOT consumed, no send', async () => {
   _resetForTests();
   const corr = completedSource();
-  const hash = preparedApprovedHash(corr);
+  const hash = await preparedApprovedHash(corr);
   const { deps, captured } = fakeDeps();
   // same source but different destination → different envelope → hash mismatch
   const result = await sendRelay({ ...BASE_INPUT, sourceCorrelationId: corr, destination: 'claude', approvalHash: hash }, deps);
@@ -102,7 +102,7 @@ test('R6: hash binding — altered destination/content/policy → mismatch, appr
 test('R6: CAS single-use — second send of same hash refused (already_consumed), no second wire', async () => {
   _resetForTests();
   const corr = completedSource();
-  const hash = preparedApprovedHash(corr);
+  const hash = await preparedApprovedHash(corr);
   const first = fakeDeps();
   const second = fakeDeps();
   const r1 = await sendRelay({ ...BASE_INPUT, sourceCorrelationId: corr, approvalHash: hash }, first.deps);
@@ -117,7 +117,7 @@ test('R6: CAS single-use — second send of same hash refused (already_consumed)
 test('R6: surface-gone pre-flight — distinct terminal, approval NOT consumed, no send', async () => {
   _resetForTests();
   const corr = completedSource();
-  const hash = preparedApprovedHash(corr);
+  const hash = await preparedApprovedHash(corr);
   const { deps, captured } = fakeDeps({ preflightOk: false });
   const result = await sendRelay({ ...BASE_INPUT, sourceCorrelationId: corr, approvalHash: hash }, deps);
   assert.equal(result.ok, false);
@@ -130,7 +130,7 @@ test('R6: surface-gone pre-flight — distinct terminal, approval NOT consumed, 
 test('R6: expired approval → send refused before destination contact', async () => {
   _resetForTests();
   const corr = completedSource();
-  const p = prepareRelay({ ...BASE_INPUT, sourceCorrelationId: corr });
+  const p = await prepareRelay({ ...BASE_INPUT, sourceCorrelationId: corr });
   const hash = (p as any).envelopeHash;
   approveRelay({ approvalHash: hash, correlationId: corr, expiresAt: new Date(Date.now() - 1000).toISOString() });
   const { deps, captured } = fakeDeps();
@@ -144,7 +144,7 @@ test('R6: expired approval → send refused before destination contact', async (
 test('R6: rejected (never approved) → send refused', async () => {
   _resetForTests();
   const corr = completedSource();
-  const p = prepareRelay({ ...BASE_INPUT, sourceCorrelationId: corr });
+  const p = await prepareRelay({ ...BASE_INPUT, sourceCorrelationId: corr });
   const hash = (p as any).envelopeHash;
   const { rejectRelay } = await import('../../dist/core/relay.js');
   const rej = await Promise.resolve(rejectRelay({ approvalHash: hash, correlationId: corr }));
@@ -169,7 +169,7 @@ test('R6: unapproved hash (never recorded) → refused', async () => {
 test('R6: send failure → blocked receipt recorded, approval already consumed (fresh approval needed for retry)', async () => {
   _resetForTests();
   const corr = completedSource();
-  const hash = preparedApprovedHash(corr);
+  const hash = await preparedApprovedHash(corr);
   const { deps, captured } = fakeDeps({ sendOk: false });
   const result = await sendRelay({ ...BASE_INPUT, sourceCorrelationId: corr, approvalHash: hash }, deps);
   assert.equal(result.ok, false);
@@ -184,7 +184,7 @@ test('R6: send failure → blocked receipt recorded, approval already consumed (
 test('R6: buildWireContent — rawMarkdown opt-in passes structure through', async () => {
   _resetForTests();
   const corr = completedSource();
-  const p = prepareRelay({ ...BASE_INPUT, sourceCorrelationId: corr, rawMarkdown: true });
+  const p = await prepareRelay({ ...BASE_INPUT, sourceCorrelationId: corr, rawMarkdown: true });
   assert.ok(p.ok);
   const { envelope, evaluation } = p as any;
   const wire = buildWireContent(envelope, evaluation);
@@ -202,7 +202,7 @@ test('R6: buildWireContent — no attribution header → content still sent', as
 test('R6: policy re-validation at send — deadline passed since prepare blocks even with approval', async () => {
   _resetForTests();
   const corr = completedSource();
-  const hash = preparedApprovedHash(corr);
+  const hash = await preparedApprovedHash(corr);
   const { deps, captured } = fakeDeps();
   // deadline in the past → policy blocked at send (even though approved)
   const result = await sendRelay({ ...BASE_INPUT, sourceCorrelationId: corr, approvalHash: hash, deadlineMs: Date.now() - 100 }, deps);

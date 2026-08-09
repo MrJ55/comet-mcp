@@ -86,7 +86,8 @@ test('status determination: ask-follow-up wins over working text', () => {
     hasLoadingSpinner: false,
     bodyText: 'Here is the answer that mentions Searching and Analyzing. Ask a follow-up',
   });
-  assert.equal(status, 'completed');
+  assert.equal(status.state, 'completed');
+  assert.equal(status.completionConfidence, 'authoritative', 'ask-follow-up is an end-of-answer marker');
 });
 
 test('status determination: stop button means working', () => {
@@ -95,7 +96,7 @@ test('status determination: stop button means working', () => {
     hasLoadingSpinner: false,
     bodyText: 'Working on it',
   });
-  assert.equal(status, 'working');
+  assert.equal(status.state, 'working');
 });
 
 test('status determination: idle when nothing happening', () => {
@@ -104,5 +105,25 @@ test('status determination: idle when nothing happening', () => {
     hasLoadingSpinner: false,
     bodyText: 'Home  Discover  Spaces',
   });
-  assert.equal(status, 'idle');
+  assert.equal(status.state, 'idle');
+});
+
+test('status determination: Finished marker → completed AUTHORITATIVE (2026-08-09 latency fix)', () => {
+  const status = determineStatus({
+    hasActiveStopButton: false,
+    hasLoadingSpinner: false,
+    bodyText: 'Finished. Here is the synthesized answer.',
+  });
+  assert.equal(status.state, 'completed');
+  assert.equal(status.completionConfidence, 'authoritative');
+});
+
+test('status determination: steps completed ALONE → completed HEURISTIC (may precede final synthesis)', () => {
+  const status = determineStatus({
+    hasActiveStopButton: false,
+    hasLoadingSpinner: false,
+    bodyText: '4 steps completed',
+  });
+  assert.equal(status.state, 'completed');
+  assert.equal(status.completionConfidence, 'heuristic', 'steps-only is a step-phase marker, not end-of-answer');
 });
