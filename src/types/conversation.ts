@@ -97,6 +97,24 @@ export interface RelayControls {
    * resolveContentPersistenceMode() defaults: relay ⇒ redacted, native ⇒ full.
    */
   contentPersistenceMode?: ContentPersistenceMode;
+  /**
+   * P4 R3: absolute rule — never auto-resend (design 05 §1.3). Default false;
+   * a resend requires fresh client approval every time, never automatic.
+   */
+  allowResend?: boolean;
+  /**
+   * P4 R3: hard cap on relay sends per correlation (design 05 §3.3). Prevents
+   * runaway relay chains even under client error; undefined = no cap (caller
+   * explicitly opted out), 0 = no relays allowed.
+   */
+  maxRelaysPerCorrelation?: number;
+  /**
+   * P4 R3: markdown trust-boundary control (design 05 §2 resolution). Default
+   * false ⇒ structural markdown neutralized in approval-required mode (strip
+   * link URLs, remove embedded media, fence code blocks). true = opt-in raw
+   * pass-through (grok's content-preservation case).
+   */
+  rawMarkdown?: boolean;
 }
 
 /**
@@ -220,6 +238,9 @@ export const CONSERVATIVE_RELAY_DEFAULTS: RelayControls = {
   mode: 'approval-required',
   approved: false,
   destinationEnabled: false,
+  // P4 R3: absolute no-auto-resend + security-first markdown defaults
+  allowResend: false,
+  rawMarkdown: false,
 };
 
 /** Default budget — every send is bounded even before a plan exists. */
