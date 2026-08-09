@@ -157,6 +157,14 @@ export type ConversationEventType =
   | 'response.received'
   /** Same content hash / provider message id as a prior event — dedup, no new send. */
   | 'response.deduplicated'
+  /**
+   * ADR 0009 follow-up (2026-08-09): content GROWTH after an early authoritative
+   * finalize — a later poll sees a longer same-prefix superset of an already
+   * recorded response. Recorded INSTEAD of a second response.received so
+   * downstream consumers can see the amendment without confusing two terminal
+   * events. relay_prepare picks the newest terminal, so this is belt-and-braces.
+   */
+  | 'response.amended'
   | 'delivery.receipt'
   | 'relay.approved'
   | 'relay.rejected'

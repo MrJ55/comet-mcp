@@ -22,7 +22,7 @@ import { chatgptDriver } from './chatgpt.js';
 import { claudeDriver } from './claude.js';
 import {
   hasIdempotencyKey, getIdempotencyEvent, recordEnvelopeCreated, recordSendEvent,
-  recordResponseReceived, recordResponseDeduplicated, recordDeliveryReceipt,
+  recordResponseReceived, recordResponseDeduplicated, recordResponseAmended, recordDeliveryReceipt,
   eventsForCorrelation, hasResponseHash, checkpointCursor,
   nextSequence, _resetForTests as _eventStoreReset,
 } from '../core/event-store.js';
@@ -894,17 +894,27 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
         idempotencyKey: envelope.idempotencyKey,
       };
       // durable: response.received (+ cursor checkpoint) → delivery.receipt
-      // completed (normal) or completed_late (recovered after soft expiry)
+      // completed (normal) or completed_late (recovered after soft expiry).
+      // ADR 0009 follow-up: if this content is a same-prefix GROWTH of an already
+      // recorded terminal response (early authoritative finalize, content kept
+      // streaming), record response.amended instead of a second response.received.
       const alreadyRecorded = hasResponseHash(envelope.correlationId, hash);
-      const responseEv = alreadyRecorded
-        ? recordResponseDeduplicated({ ...envelope, content: p.prompt }, driver.provider, {
+      const amended = !alreadyRecorded
+        ? recordResponseAmended({ ...envelope, content: p.prompt }, driver.provider, {
             messageId: poll.messageId, contentHash: hash, cursor: poll.cursor ?? hash,
             state: poll.state, text: outcome.response, steps: p.stepsCollected,
           })
-        : recordResponseReceived({ ...envelope, content: p.prompt }, driver.provider, {
-            messageId: poll.messageId, contentHash: hash, cursor: poll.cursor ?? hash,
-            state: poll.state, text: outcome.response, steps: p.stepsCollected,
-          }, targetId);
+        : null;
+      const responseEv = amended
+        ?? (alreadyRecorded
+          ? recordResponseDeduplicated({ ...envelope, content: p.prompt }, driver.provider, {
+              messageId: poll.messageId, contentHash: hash, cursor: poll.cursor ?? hash,
+              state: poll.state, text: outcome.response, steps: p.stepsCollected,
+            })
+          : recordResponseReceived({ ...envelope, content: p.prompt }, driver.provider, {
+              messageId: poll.messageId, contentHash: hash, cursor: poll.cursor ?? hash,
+              state: poll.state, text: outcome.response, steps: p.stepsCollected,
+            }, targetId));
       recordDeliveryReceipt({
         receiptId: `rct-${responseEv.seq}`, envelopeId: envelope.idempotencyKey,
         correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,

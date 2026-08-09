@@ -376,6 +376,45 @@ export function recordResponseDeduplicated(
 }
 
 /**
+ * ADR 0009 follow-up: record CONTENT GROWTH after an early authoritative finalize.
+ * When a later poll sees a longer SAME-PREFIX superset of an already-recorded
+ * terminal response, record `response.amended` INSTEAD of a second
+ * response.received — downstream consumers (relay, replay) see the amendment as
+ * one logical response that grew, not two terminal events. Returns null when the
+ * new content is NOT a same-prefix superset (caller should record a fresh
+ * response.received — it is a genuinely new turn).
+ */
+export function recordResponseAmended(
+  envelope: ConversationEnvelope,
+  provider: ProviderId,
+  response: { messageId?: string; contentHash: string; cursor?: string; state: string; text: string; steps: string[] },
+): ConversationEvent | null {
+  ensureLoaded();
+  const prior = [...eventsForCorrelation(envelope.correlationId)].reverse().find(
+    (e) => e.type === 'response.received' && typeof e.response?.poll.response === 'string',
+  );
+  // no prior terminal response ⇒ nothing to amend (caller records response.received)
+  if (!prior) return null;
+  const priorText = prior.response!.poll.response;
+  // same-prefix, strictly-longer superset ⇒ amendment; otherwise not an amendment
+  if (!(response.text.length > priorText.length && response.text.startsWith(priorText))) return null;
+  return appendEvent({
+    type: 'response.amended',
+    correlationId: envelope.correlationId,
+    envelopeId: envelope.idempotencyKey,
+    idempotencyKey: envelope.idempotencyKey,
+    persistenceMode: resolveContentPersistenceMode(envelope),
+    response: {
+      provider,
+      messageId: response.messageId,
+      contentHash: response.contentHash,
+      cursor: response.cursor,
+      poll: { state: response.state, response: response.text, steps: response.steps },
+    },
+  });
+}
+
+/**
  * Record a delivery receipt — APPEND-ONLY stream (critique L37: "treat receipts as
  * an append-only stream, not a mutable record"). Each attempt is its own row;
  * retries reuse idempotencyKey and carry incrementing attempt numbers.

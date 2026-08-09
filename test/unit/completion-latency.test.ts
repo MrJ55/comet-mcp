@@ -124,3 +124,50 @@ test('latency: perplexity determineStatus — follow-up authoritative, steps-onl
   const working = determineStatus({ hasActiveStopButton: true, hasLoadingSpinner: false, bodyText: 'Working' });
   assert.equal(working.state, 'working');
 });
+
+// ---------------------------------------------------------------------------
+// Follow-up A: response.amended (ADR 0009) — growth after early finalize
+// ---------------------------------------------------------------------------
+
+test('amended: same-prefix GROWTH after a recorded response → response.amended, not a second response.received', async () => {
+  const es = await import('../../dist/core/event-store.js');
+  const { _resetForTests, eventsForCorrelation, recordEnvelopeCreated, recordResponseReceived, recordResponseAmended } = es;
+  const { makeEnvelope } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  const env = makeEnvelope('grok', 'amend-key');
+  recordEnvelopeCreated(env);
+  // first terminal response (early authoritative finalize)
+  recordResponseReceived(env, 'grok', {
+    messageId: 'm1', contentHash: 'h1', cursor: 'c', state: 'completed',
+    text: 'The answer starts here', steps: [],
+  }, 'tab-1');
+  // later poll sees the same content GROWN (same prefix, longer)
+  const amended = recordResponseAmended(env, 'grok', {
+    messageId: 'm2', contentHash: 'h2', cursor: 'c', state: 'completed',
+    text: 'The answer starts here and continues with more detail', steps: [],
+  });
+  assert.ok(amended, 'growth recorded as amendment');
+  assert.equal(amended!.type, 'response.amended');
+  const types = eventsForCorrelation(env.correlationId).map((e) => e.type);
+  assert.equal(types.filter((t) => t === 'response.received').length, 1, 'exactly ONE response.received');
+  assert.equal(types.filter((t) => t === 'response.amended').length, 1, 'one amendment');
+});
+
+test('amended: NOT a same-prefix superset → returns null (genuinely new turn, record fresh received)', async () => {
+  const es = await import('../../dist/core/event-store.js');
+  const { _resetForTests, recordEnvelopeCreated, recordResponseReceived, recordResponseAmended } = es;
+  const { makeEnvelope } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  const env = makeEnvelope('grok', 'amend-key2');
+  recordEnvelopeCreated(env);
+  recordResponseReceived(env, 'grok', {
+    messageId: 'm1', contentHash: 'h1', cursor: 'c', state: 'completed',
+    text: 'First turn answer', steps: [],
+  }, 'tab-1');
+  // different content (not a prefix superset)
+  const notAmended = recordResponseAmended(env, 'grok', {
+    messageId: 'm2', contentHash: 'h2', cursor: 'c', state: 'completed',
+    text: 'Unrelated new content', steps: [],
+  });
+  assert.equal(notAmended, null, 'non-superset is NOT an amendment');
+});
