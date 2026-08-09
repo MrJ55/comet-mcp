@@ -223,6 +223,17 @@ test('ADR 0010: stripSentinel removes a terminal sentinel (own line) + trailing 
   assert.equal(n.text, 'Zz9Xq2Gm mid sentence, more text');
 });
 
+test('ADR 0010: stripSentinel also cleans MARKDOWN content (leak caught live on claude)', async () => {
+  const { stripSentinel } = await import('../../dist/drivers/index.js');
+  const md = stripSentinel('**Mercury** is smallest.\n\nABC123', 'ABC123');
+  assert.equal(md.found, true);
+  assert.equal(md.text, '**Mercury** is smallest.');
+  assert.ok(!md.text.includes('ABC123'), 'markdown sentinel stripped');
+  // markdown without a terminal sentinel is untouched
+  const md2 = stripSentinel('**Saturn** is second.', 'ABC123');
+  assert.equal(md2.found, false);
+});
+
 test('ADR 0010: completionMarker ask — sentinel present → finalizes on FIRST completed poll, sentinel stripped from stored response', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
   const { dispatchAsk, advanceAsk, isAskPending } = await import('../../dist/drivers/index.js');

@@ -920,7 +920,16 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   if (p.sentinel) {
     const stripped = stripSentinel(poll.response, p.sentinel);
     if (stripped.found) {
-      poll = { ...poll, response: stripped.text, completionConfidence: 'authoritative' };
+      // strip from BOTH text and markdown (the driver converts HTML → markdown
+      // before we see it, so the sentinel can appear in either — leak caught
+      // live on claude 2026-08-09)
+      const mdStripped = poll.markdown ? stripSentinel(poll.markdown, p.sentinel) : null;
+      poll = {
+        ...poll,
+        response: stripped.text,
+        markdown: mdStripped?.found ? mdStripped.text : poll.markdown,
+        completionConfidence: 'authoritative',
+      };
     }
   }
   // recompute the hash from the (possibly sentinel-stripped) response so the
