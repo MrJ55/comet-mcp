@@ -525,16 +525,23 @@ test('852f96e regression (2026-08-10 grok live bug): native-marker authoritative
   const p3 = await advanceAsk(dispatched.idempotencyKey);
   assert.equal(p3?.completed, false, 'advance #3 (grew): NOT complete');
   assert.equal(d._calls.asked.length, 1, 'reminder NEVER fired while content grew — grok not interrupted');
-  // advance #4: first STABLE poll → hash-confirmed authoritative ⇒ gate passes,
-  // but the model never emitted the sentinel ⇒ bounded ADR 0011 reminder fires
+  // advance #4: first STABLE poll → code still missing → the reply is NOT
+  // complete yet (per the 2026-08-10 user rule: completion waits for the line;
+  // the stability window is the render grace). Returns confirming.
   const p4 = await advanceAsk(dispatched.idempotencyKey);
-  assert.equal(p4?.completed, false, 'stable content: gate passes, but reminder still pending');
-  assert.equal(p4?.status, 'reminder_sent', 'bounded reminder fires only AFTER stability confirmed');
-  assert.equal(d._calls.asked.length, 2, 'exactly one reminder ask');
-  // advance #5: reminder already sent → finalizes completed with the full answer
+  assert.equal(p4?.completed, false, 'stable-but-lineless: NOT complete yet — waiting for the line');
+  assert.equal(p4?.status, 'confirming', 'lineless stable reply stays confirming (render grace)');
+  assert.equal(d._calls.asked.length, 1, 'no reminder while the line may still render');
+  // let the 3s heuristic floor elapse: page has now stabilized WITHOUT the line
+  await new Promise((r) => setTimeout(r, 3200));
   const p5 = await advanceAsk(dispatched.idempotencyKey);
-  assert.equal(p5?.completed, true, 'stable content with prior poll → hash-confirmed authoritative completes');
-  assert.ok(p5?.response.includes('Mercury is the smallest planet.'), 'full answer returned');
+  assert.equal(p5?.completed, false, 'stable + lineless + window held: reminder still pending');
+  assert.equal(p5?.status, 'reminder_sent', 'reminder fires ONLY after the page stabilized without the line');
+  assert.equal(d._calls.asked.length, 2, 'exactly one reminder ask');
+  // advance #6: reminder already sent → bounded fallback completes the ask
+  const p6 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p6?.completed, true, 'completion remains valid after the bounded reminder');
+  assert.ok(p6?.response.includes('Mercury is the smallest planet.'), 'full answer returned');
   assert.equal(d._calls.asked.length, 2, 'completion achieved without extra reminder asks');
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
 });
@@ -635,4 +642,52 @@ test('2026-08-10 perplexity live bug: tab RESET clears the session sentinel — 
   } finally {
     (sessionPool as any).get = realGet;
   }
+});
+
+test('2026-08-10 perplexity LIVE bug (reminder at 14:07:18 raced the line render at 14:07:24): a stable lineless reply whose status line renders on the NEXT poll completes cleanly — NO reminder', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advanceAsk, isAskPending, _resetPendingForTests } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  _resetPendingForTests();
+  // perplexity appends the status line LAST — the answer stabilizes WITHOUT it,
+  // then the line renders on the next poll (observed live). The gate must NOT
+  // complete the lineless state (reminder would fire) — it waits through the
+  // stability window; when the line appears, the hash changes and the reply
+  // completes cleanly via the shape path, zero reminders.
+  let pollN = 0;
+  const d = {
+    provider: 'perplexity',
+    open: async () => ({ provider: 'perplexity', tabId: 't', targetId: 't', cdpSessionId: 'ws://x', openedAt: '', state: 'connected' }),
+    ask: async () => { d._calls.asked.push('Q'); return { receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'sent' as const, recordedAt: '' } }; },
+    poll: async () => {
+      d._calls.polls++;
+      if (d._calls.polls === 1) return { state: 'idle', steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+      if (d._calls.polls === 2) return { state: 'completed', completionConfidence: 'authoritative' as const, steps: [], currentStep: '', response: 'The full answer text without the line yet.', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+      // polls 3+: the status line has now RENDERED (hash changes)
+      return { state: 'completed', completionConfidence: 'authoritative' as const, steps: [], currentStep: '', response: 'The full answer text without the line yet.\n\nTurn 3, 08/10/26, 10:28 AM EDT, Perplexity, 6%', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+    },
+    stop: async () => true, reset: async () => {},
+    health: async () => ({ provider: 'perplexity', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),
+    _calls: { asked: [] as string[], polls: 0 },
+  } as any;
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  // poll #1: answer WITHOUT the line, authoritative → not complete (code missing), no reminder
+  const p1 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p1?.completed, false, 'lineless reply: NOT complete (code missing — completion waits for the line)');
+  assert.equal(p1?.status, 'confirming', 'waits through the stability window');
+  assert.equal(d._calls.asked.length, 1, 'NO reminder while the line may still render');
+  // poll #2: the status line has rendered → hash CHANGED → authoritative needs
+  // a confirm poll (still not complete, still no reminder)
+  const p2 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p2?.completed, false, 'line just rendered: hash changed → confirming one more poll');
+  assert.notEqual(p2?.status, 'reminder_sent', 'NO reminder — the line arrived, no escalation needed');
+  assert.equal(d._calls.asked.length, 1, 'still exactly one ask');
+  // poll #3: stable with the line → shape-compliant + hash-confirmed → completes
+  const p3 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p3?.completed, true, 'line rendered + hash-confirmed → completes cleanly via the shape path');
+  assert.notEqual(p3?.status, 'reminder_sent', 'NO reminder — the line arrived before the window escalated');
+  assert.equal(d._calls.asked.length, 1, 'exactly one ask — the reminder never fired');
+  assert.ok(p3?.response.includes('Turn 3, 08/10/26, 10:28 AM EDT, Perplexity, 6%'), 'status line preserved');
+  assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
 });

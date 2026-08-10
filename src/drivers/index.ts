@@ -1074,8 +1074,42 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
     // and timer-free — no wall clock. heuristic/weak keep the stability window
     // (entry override > confidence map > 8s). Missing confidence ⇒ weak.
     const confidence = poll.completionConfidence ?? 'weak';
+    // 2026-08-10 (user rule): for a completionMarker ask, the CODE is the
+    // completion contract. A reply that lacks the sentinel AND lacks a
+    // status-line shape is NOT complete — regardless of native markers or hash
+    // confirmation — because the model was instructed to end with the line and
+    // the line renders LAST (perplexity appends it after the answer, observed
+    // live 14:07:18→14:07:24). Completion therefore waits for the line.
+    const shapeCompliant = parseStatusLineShape(poll.response).found;
     let complete: boolean;
-    if (confidence === 'authoritative') {
+    if (p.sentinel && !sentinelConfirmed && !shapeCompliant) {
+      // completionMarker ask, code missing: NOT complete. Hold the stability
+      // window to give the line a chance to render (when it renders, the hash
+      // changes and this branch re-evaluates on the next poll). The wait is
+      // floored at the heuristic window (3s) even for authoritative confidence
+      // — a 0ms window would escalate on the first poll, before the line has
+      // had any chance to render. Only when the window has held on a STILL
+      // lineless reply do we escalate: one bounded reminder, then a bounded
+      // fallback so the ask never hangs.
+      const windowMs = Math.max(windowForPoll(poll), CONFIDENCE_WINDOWS.heuristic);
+      const stability = completionStability(hash, p.prevHash, p.stableSince, Date.now(), windowMs);
+      p.stableSince = stability.stableSince;
+      if (!stability.complete) {
+        complete = false; // waiting for the line — keep confirming
+      } else if (!p.reminderSent && p.sendVerified) {
+        p.reminderSent = true;
+        recordSendEvent({ ...envelope, content: p.prompt }, 'send.queued');
+        await driver.ask(session, statusLineReminder(p.sentinel));
+        return {
+          completed: false, response: '', markdown: null, steps: p.stepsCollected,
+          currentStep: '', status: 'reminder_sent',
+          agentBrowsingUrl: '', timedOut: false,
+          correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
+        };
+      } else {
+        complete = true; // reminder already sent → bounded fallback: finalize anyway
+      }
+    } else if (confidence === 'authoritative') {
       // sentinel presence is DEFINITIVE (model wrote it last per instruction) —
       // no hash confirmation needed. NATIVE markers (grok "Worked for Xs",
       // perplexity follow-up) keep hash confirmation AND require a prior poll
@@ -1091,28 +1125,11 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
       complete = stability.complete;
     }
     if (complete) {
-      // ADR 0011 compliance loop (2026-08-10): the gate has now VALIDATED the
-      // reply is genuinely done (stability held / hash-confirmed) — but if the
-      // sentinel is missing and a reminder hasn't been sent yet, inject ONE
-      // bounded reminder asking for ONLY the status line, keep the ask pending,
-      // and re-check on the next poll. Only for completionMarker asks with a
-      // verified send; never mid-stream (the gate already proved completion).
-      // 2026-08-10 amendment (user report): a status-line SHAPE without the
-      // token is COMPLIANT-ENOUGH — the model followed the convention, just
-      // dropped the control artifact. No reminder; the reply completes through
-      // the stability/hash path instead (parseStatusLineShape).
-      const shapeCompliant = parseStatusLineShape(poll.response).found;
-      if (p.sentinel && !sentinelConfirmed && !shapeCompliant && !p.reminderSent && p.sendVerified) {
-        p.reminderSent = true;
-        recordSendEvent({ ...envelope, content: p.prompt }, 'send.queued');
-        await driver.ask(session, statusLineReminder(p.sentinel));
-        return {
-          completed: false, response: '', markdown: null, steps: p.stepsCollected,
-          currentStep: '', status: 'reminder_sent',
-          agentBrowsingUrl: '', timedOut: false,
-          correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
-        };
-      }
+      // 2026-08-10 (user rule): for completionMarker asks the code is the
+      // completion contract — the reminder path above is the ONLY place a
+      // lineless reply can escalate, and it happens BEFORE finalize. Reaching
+      // here means the reply carries the sentinel/shape (or the bounded
+      // fallback after one reminder) — no separate compliance loop needed.
       pendingAsks.delete(key);
       const wasLate = p.phase === 'watching';
       const outcome: AskOutcome = {
