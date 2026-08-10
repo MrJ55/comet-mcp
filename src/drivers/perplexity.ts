@@ -125,15 +125,36 @@ const POLL_SCRIPT = `(() => {
   }
   const hasLoadingSpinner = document.querySelector('[class*="animate-spin"], [class*="animate-pulse"]') !== null;
 
-  // collect RAW prose texts (filtering happens Node-side)
+  // collect RAW prose texts (filtering happens Node-side). 2026-08-10 FIX:
+  // scope to the CURRENT TURN — the last assistant message — not the whole
+  // thread. Previously ALL prose in <main> was collected and joined (capped at
+  // RESPONSE_CAP=30K). Typing a new user prompt grows that join, so
+  // sawNewResponse fired on the user's own prompt before the model answered,
+  // and the gate finalized with the PREVIOUS turn's content (perplexity live
+  // bugs 2026-08-10: prompt-3 asks completed in ~3s with the P7 hash
+  // cdc52a21 / 1f8ccbe6). The status-line convention is our own anchor: each
+  // assistant message ends with \"Turn N, MM/DD/YY, time, model, %\" — the
+  // current turn is everything AFTER the second-to-last status line (answer
+  // fragments + the trailing status line). If no/one status line exists, take
+  // the whole collected set (first turn).
   const mainContent = document.querySelector('main') || document.body;
+  const allProse = Array.from(mainContent.querySelectorAll('[class*="prose"]'));
+  const isStatusLine = (el: Element) => /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},/.test((el.textContent || '').trim());
+  let currentStart = 0;
+  let seenStatus = 0;
+  for (let i = 0; i < allProse.length; i++) {
+    if (isStatusLine(allProse[i])) {
+      seenStatus++;
+      if (seenStatus === 2) currentStart = i + 1; // second status line = end of previous turn
+    }
+  }
   const proseTexts = [];
   const proseHtmls = [];
-  for (const el of mainContent.querySelectorAll('[class*="prose"]')) {
+  for (let i = currentStart; i < allProse.length; i++) {
+    const el = allProse[i];
     if (el.closest('nav, aside, header, footer, form')) continue;
     const t = el.innerText.trim();
     if (t.length > 0) proseTexts.push(t);
-    // P2 markdown: capture the LAST prose element's innerHTML for conversion
     proseHtmls.push(el.innerHTML);
   }
 
