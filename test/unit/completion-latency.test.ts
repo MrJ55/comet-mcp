@@ -177,7 +177,7 @@ test('amended: NOT a same-prefix superset → returns null (genuinely new turn, 
 // ---------------------------------------------------------------------------
 
 function sentinelDriver(answer: string, comply = true) {
-  const calls = { asked: [], polls: 0, reminders: 0 };
+  const calls = { asked: [], polls: 0 };
   // the driver echoes the sentinel from the WRAPPED prompt so the response ends
   // with the SAME sentinel dispatchAsk generated (compliance simulation);
   // comply=false → the model ignores the instruction (no sentinel)
@@ -193,8 +193,8 @@ function sentinelDriver(answer: string, comply = true) {
     poll: async () => {
       calls.polls++;
       if (calls.polls === 1) return { state: 'idle', steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
-      const wrapped = calls.asked[0] ?? '';
-      return { state: 'completed', steps: [], currentStep: '', response: echoedAnswer(wrapped), markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+      // report heuristic (3s) confidence so the gate's window is short in tests
+      return { state: 'completed', completionConfidence: 'heuristic' as const, steps: [], currentStep: '', response: echoedAnswer(calls.asked[0] ?? ''), markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
     },
     stop: async () => true,
     reset: async () => {},
@@ -288,26 +288,34 @@ test('ADR 0010: completionMarker ask — sentinel present → finalizes on FIRST
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
 });
 
-test('ADR 0011: non-compliant model (no sentinel) → reminder injected ONCE, ask stays pending', async () => {
+test('ADR 0011: non-compliant model (no sentinel) → reminder injected ONCE after stability, ask stays pending', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
   const { dispatchAsk, advanceAsk, isAskPending } = await import('../../dist/drivers/index.js');
   _resetForTests();
   const d = sentinelDriver('Plain answer without the marker', false);
   const session = await d.open();
   const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
-  // completed but NO sentinel ⇒ ADR 0011 injects a bounded reminder, stays pending
+  // poll #1: completed but window not yet held → no reminder (mid-stream guard)
   const first = await advanceAsk(dispatched.idempotencyKey);
-  assert.ok(first && !first.completed, 'not completed yet (reminder path)');
-  assert.equal(first?.status, 'reminder_sent', 'reminder injected, awaiting the model reply');
+  assert.ok(first && !first.completed, 'not completed yet');
+  assert.notEqual(first?.status, 'reminder_sent', 'no reminder before the stability window holds');
+  assert.equal(d._calls.asked.length, 1, 'no follow-up yet');
+  // let the heuristic (3s) stability window elapse, then poll again → reminder fires
+  await new Promise((r) => setTimeout(r, 3200));
+  const second = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(second?.status, 'reminder_sent', 'reminder injected after the gate validated completion');
   assert.equal(d._calls.asked.length, 2, 'reminder sent as a follow-up ask in the thread');
   assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending (compliance loop)');
-  // a SECOND non-compliant poll does NOT re-inject (bounded — one reminder)
-  const second = await advanceAsk(dispatched.idempotencyKey);
+  // poll #3: non-compliant again → NO re-inject (bounded — one reminder); the
+  // gate's window (started at poll #1) has held, so it FALLS BACK and finalizes
+  // the (still non-compliant) answer via the normal stability path.
+  const third = await advanceAsk(dispatched.idempotencyKey);
   assert.equal(d._calls.asked.length, 2, 'reminder not re-sent (bounded once)');
-  assert.ok(second && !second.completed, 'falls to the normal stability path after the reminder');
+  assert.equal(third?.completed, true, 'falls back to normal completion after the bounded reminder');
+  assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized via fallback after the reminder');
 });
 
-test('ADR 0011: reminder loop — model complies after the reminder → finalizes authoritative with status line stripped', async () => {
+test('ADR 0011: reminder loop — injects only when content STABLE (not mid-stream), model complies after reminder → finalizes', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
   const { dispatchAsk, advanceAsk, isAskPending } = await import('../../dist/drivers/index.js');
   _resetForTests();
@@ -321,8 +329,9 @@ test('ADR 0011: reminder loop — model complies after the reminder → finalize
       calls.polls++;
       if (calls.polls === 1) return { state: 'idle', steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
       if (calls.asked.length < 2) {
-        // first ask: compliant-looking answer WITHOUT the status line
-        return { state: 'completed', steps: [], currentStep: '', response: 'First answer, no status line.', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+        // first ask: compliant-looking answer WITHOUT the status line (STABLE —
+        // same content every poll, so the reminder fires after stability holds)
+        return { state: 'completed' as const, completionConfidence: 'heuristic' as const, steps: [], currentStep: '', response: 'First answer, no status line.', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
       }
       // after the reminder (ask #2): now WITH the status line + sentinel
       const m = calls.asked[1].match(/then the code (\S+)/) ?? calls.asked[1].match(/exact string (\S+)/);
@@ -336,12 +345,19 @@ test('ADR 0011: reminder loop — model complies after the reminder → finalize
   } as any;
   const session = await d.open();
   const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  // poll #1: completed but the stability window has not held → NO reminder (mid-stream guard)
   const first = await advanceAsk(dispatched.idempotencyKey);
-  assert.equal(first?.status, 'reminder_sent', 'reminder injected');
+  assert.notEqual(first?.status, 'reminder_sent', 'no reminder before the window holds');
+  // let the heuristic (3s) window elapse, then poll → gate validates → reminder fires
+  await new Promise((r) => setTimeout(r, 3200));
   const second = await advanceAsk(dispatched.idempotencyKey);
-  assert.equal(second?.completed, true, 'compliance after reminder ⇒ finalizes');
-  assert.equal(second?.response, 'First answer, no status line.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test, 2%', 'sentinel stripped, status line preserved');
-  assert.ok(!second?.response.includes('NOPE'), 'no sentinel leak');
+  assert.equal(second?.status, 'reminder_sent', 'reminder injected only after the gate validated completion');
+  assert.equal(d._calls.asked.length, 2, 'reminder sent as a follow-up ask');
+  // poll #3: model complied after the reminder → finalizes authoritative, line stripped
+  const third = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(third?.completed, true, 'compliance after reminder ⇒ finalizes');
+  assert.equal(third?.response, 'First answer, no status line.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test, 2%', 'sentinel stripped, status line preserved');
+  assert.ok(!third?.response.includes('NOPE'), 'no sentinel leak');
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized after reminder loop');
 });
 
@@ -351,8 +367,9 @@ test('ADR 0011: reminder loop — model complies after the reminder → finalize
 
 test('advancer: a finished ask finalizes via the timer sweep WITHOUT any client poll', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
-  const { dispatchAsk, advancePendingAsks, isAskPending } = await import('../../dist/drivers/index.js');
+  const { dispatchAsk, advancePendingAsks, isAskPending, _resetPendingForTests } = await import('../../dist/drivers/index.js');
   _resetForTests();
+  _resetPendingForTests();
   const d = sentinelDriver('Timer-finalized answer.');
   const session = await d.open();
   const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
@@ -371,8 +388,9 @@ test('advancer: a finished ask finalizes via the timer sweep WITHOUT any client 
 
 test('advancer: replayOutcomeIfRecorded recovers the CLEAN outcome after server-side finalize (ADR 0011 live bug)', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
-  const { dispatchAsk, advancePendingAsks, replayOutcomeIfRecorded } = await import('../../dist/drivers/index.js');
+  const { dispatchAsk, advancePendingAsks, replayOutcomeIfRecorded, _resetPendingForTests } = await import('../../dist/drivers/index.js');
   _resetForTests();
+  _resetPendingForTests();
   const d = sentinelDriver('Clean recovered answer.');
   const session = await d.open();
   const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
@@ -386,8 +404,9 @@ test('advancer: replayOutcomeIfRecorded recovers the CLEAN outcome after server-
 
 test('advancer: age guard — a JUST-dispatched ask is skipped on the first sweep (dispatch→submit window)', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
-  const { dispatchAsk, advancePendingAsks, isAskPending } = await import('../../dist/drivers/index.js');
+  const { dispatchAsk, advancePendingAsks, isAskPending, _resetPendingForTests } = await import('../../dist/drivers/index.js');
   _resetForTests();
+  _resetPendingForTests();
   const d = sentinelDriver('Fast answer.');
   const session = await d.open();
   const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
@@ -422,8 +441,9 @@ test('ADR 0011 amendment: relayed envelope carries the source STATUS LINE as pro
 
 test('advancer: sweep is bounded per tick (thundering-herd guard)', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
-  const { dispatchAsk, advancePendingAsks, ADVANCE_MAX_PER_TICK, listPendingAsks } = await import('../../dist/drivers/index.js');
+  const { dispatchAsk, advancePendingAsks, ADVANCE_MAX_PER_TICK, listPendingAsks, _resetPendingForTests } = await import('../../dist/drivers/index.js');
   _resetForTests();
+  _resetPendingForTests();
   // dispatch several asks so the cap binds
   const keys: string[] = [];
   for (let i = 0; i < ADVANCE_MAX_PER_TICK + 2; i++) {

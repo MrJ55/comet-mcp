@@ -821,6 +821,18 @@ export const REAPER_INTERVAL_MS = 60 * 1000;
 
 const pendingAsks = new Map<string, PendingAsk>();
 
+/**
+ * Reset the pending-ask registry (tests only). The advancer/reminder tests
+ * share this module singleton across tests in a file — leftover pending asks
+ * (e.g. reminder_sent states) would otherwise be swept by a later test's
+ * advancePendingAsks call, corrupting its age-guard assertions.
+ */
+export function _resetPendingForTests(): void {
+  pendingAsks.clear();
+  lastDispatched.clear();
+  advancingKeys.clear();
+}
+
 /** Key a pending ask by idempotencyKey (replay-safe) or correlationId. */
 function askKey(envelope: ConversationEnvelope): string {
   return envelope.idempotencyKey;
@@ -997,22 +1009,6 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
         completionConfidence: 'authoritative',
       };
       sentinelConfirmed = true;
-    } else if (poll.state === 'completed' && !p.reminderSent && p.sendVerified) {
-      // ADR 0011 compliance loop: the model finished but skipped the status
-      // line (e.g. "Understood — I'll apply it going forward"). Inject ONE
-      // bounded reminder asking for ONLY the status line, keep the ask pending,
-      // re-check on the next poll. Never for non-completionMarker asks, and
-      // NEVER when the send was not verified (a phantom send must not trigger
-      // the compliance loop — 2026-08-10 grok live bug).
-      p.reminderSent = true;
-      recordSendEvent({ ...envelope, content: p.prompt }, 'send.queued');
-      await driver.ask(session, statusLineReminder(p.sentinel));
-      return {
-        completed: false, response: '', markdown: null, steps: p.stepsCollected,
-        currentStep: '', status: 'reminder_sent',
-        agentBrowsingUrl: '', timedOut: false,
-        correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
-      };
     }
   }
   // recompute the hash from the (possibly sentinel-stripped) response so the
@@ -1041,6 +1037,23 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
       complete = stability.complete;
     }
     if (complete) {
+      // ADR 0011 compliance loop (2026-08-10): the gate has now VALIDATED the
+      // reply is genuinely done (stability held / hash-confirmed) — but if the
+      // sentinel is missing and a reminder hasn't been sent yet, inject ONE
+      // bounded reminder asking for ONLY the status line, keep the ask pending,
+      // and re-check on the next poll. Only for completionMarker asks with a
+      // verified send; never mid-stream (the gate already proved completion).
+      if (p.sentinel && !sentinelConfirmed && !p.reminderSent && p.sendVerified) {
+        p.reminderSent = true;
+        recordSendEvent({ ...envelope, content: p.prompt }, 'send.queued');
+        await driver.ask(session, statusLineReminder(p.sentinel));
+        return {
+          completed: false, response: '', markdown: null, steps: p.stepsCollected,
+          currentStep: '', status: 'reminder_sent',
+          agentBrowsingUrl: '', timedOut: false,
+          correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
+        };
+      }
       pendingAsks.delete(key);
       const wasLate = p.phase === 'watching';
       const outcome: AskOutcome = {
