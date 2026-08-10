@@ -1044,9 +1044,13 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
     let complete: boolean;
     if (confidence === 'authoritative') {
       // sentinel presence is DEFINITIVE (model wrote it last per instruction) —
-      // no hash confirmation needed. Native markers keep hash-confirmation to
-      // guard against a marker appearing mid-stream.
-      complete = sentinelConfirmed || p.prevHash === null || hash === p.prevHash;
+      // no hash confirmation needed. NATIVE markers (grok "Worked for Xs",
+      // perplexity follow-up) keep hash confirmation AND require a prior poll
+      // (prevHash !== null): grok renders the timing line at the START of the
+      // message while the answer streams below, so a marker on the first poll
+      // must NOT complete mid-stream (2026-08-10 live bug — it let the reminder
+      // fire and interrupt grok). Only sentinelConfirmed bypasses cold-start.
+      complete = sentinelConfirmed || (p.prevHash !== null && hash === p.prevHash);
     } else {
       const windowMs = windowForPoll(poll);
       const stability = completionStability(hash, p.prevHash, p.stableSince, Date.now(), windowMs);
