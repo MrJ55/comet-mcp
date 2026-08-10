@@ -317,7 +317,8 @@ export class PerplexityDriver implements ChatDriver {
     const joinedProse = (value.proseTexts ?? []).join('\n\n').trimEnd();
     // status line anywhere in body, followed only by UI residue to EOF
     const STATUS_LINE_RE = /Turn \d+,\s*\d{2}\/\d{2}\/\d{2},[^\n]*\d+%(?:,\s*\S+)?(?=[\s\S]*?(?:Ask a follow-up|Sources|Search|$))/;
-    const hasStatusLine = STATUS_LINE_RE.test(bodyText) || /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},.*\d+%(?:\s*,\s*\S+)?$/m.test(joinedProse);
+    const statusLineMatch = bodyText.match(STATUS_LINE_RE);
+    const hasStatusLine = !!statusLineMatch || /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},.*\d+%(?:\s*,\s*\S+)?$/m.test(joinedProse);
     const status = hasStatusLine
       ? { state: 'completed' as const, completionConfidence: 'authoritative' as const }
       : determineStatus({
@@ -327,6 +328,15 @@ export class PerplexityDriver implements ChatDriver {
         });
     const { steps, currentStep } = extractSteps(bodyText);
     const extraction = status.state === 'completed' ? extractResponse(value.proseTexts ?? []) : null;
+    // 2026-08-10: the status line + sentinel render OUTSIDE [class*="prose"]
+    // (bodyText only) — append it to the response so the gate's sentinel strip
+    // and shape check see it; otherwise a completed reply looks lineless and
+    // the marker-ask gate waits/reminds needlessly.
+    let response = extraction?.response ?? '';
+    const statusLineText = statusLineMatch ? statusLineMatch[0].trim() : '';
+    if (response && statusLineText && !response.includes(statusLineText)) {
+      response = `${response}\n\n${statusLineText}`;
+    }
     // P2 markdown: convert the LAST prose container's innerHTML when completed
     const markdown = status.state === 'completed' && (value.proseHtmls?.length ?? 0) > 0
       ? htmlToMarkdown('perplexity', value.proseHtmls![value.proseHtmls!.length - 1])
@@ -336,11 +346,11 @@ export class PerplexityDriver implements ChatDriver {
       state: status.state as ProviderState,
       steps,
       currentStep,
-      response: extraction?.response ?? '',
+      response,
       markdown,
       hasStopButton: value.hasActiveStopButton === true,
       agentBrowsingUrl,
-      contentHash: extraction ? simpleHash(extraction.response) : undefined,
+      contentHash: response ? simpleHash(response) : undefined,
       // 2026-08-09 latency fix: follow-up/Finished ⇒ authoritative; steps-only ⇒ heuristic
       completionConfidence: status.completionConfidence,
       extraction: extraction
