@@ -560,3 +560,39 @@ test('ADR 0011 guard (2026-08-10 grok live bug): UNVERIFIED send must NOT trigge
   const outcome = await advanceAsk(dispatched.idempotencyKey);
   assert.notEqual(outcome?.status, 'reminder_sent', 'phantom send must NOT enter the compliance loop');
 });
+
+test('2026-08-10 perplexity live bug: tab RESET clears the session sentinel — next completionMarker ask RE-INJECTS the status-line instruction (fresh thread, fresh sentinel)', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, _resetPendingForTests } = await import('../../dist/drivers/index.js');
+  const { tabRegistry } = await import('../../dist/tab-registry.js');
+  const { sessionPool } = await import('../../dist/cdp-pool.js');
+  _resetForTests();
+  _resetPendingForTests();
+  // driver that echoes the sentinel it was told (complies), so completion works
+  const d = sentinelDriver('Answer one.', true);
+  const session = await d.open();
+  // register the session in the registry + stub the pool navigate so reset() works
+  (tabRegistry as any).tabs.set(session.targetId, session);
+  (tabRegistry as any).providerTabs.set('gemini', [session.targetId]);
+  const realGet = sessionPool.get.bind(sessionPool);
+  (sessionPool as any).get = () => ({
+    navigate: async () => ({}),
+    isHealthy: async () => true,
+  });
+  try {
+    // ask #1 in the tab: instruction injected, sentinel established
+    await dispatchAsk(d, session, 'Q1?', { timeoutMs: 60000, completionMarker: true });
+    assert.ok(d._calls.asked[0].includes('end EVERY reply in this session'), 'first ask carries the status-line instruction');
+    // RESET the tab (fresh thread — e.g. provider_close last-tab protection)
+    await tabRegistry.reset(session.targetId);
+    // ask #2 in the SAME tab after reset: MUST re-inject (new thread, new sentinel)
+    await dispatchAsk(d, session, 'Q2?', { timeoutMs: 60000, completionMarker: true });
+    assert.ok(d._calls.asked[1].includes('end EVERY reply in this session'), 'post-reset ask re-injects the instruction — NOT sent raw');
+    const s1 = d._calls.asked[0].match(/then the code (\S+)/)?.[1] ?? '';
+    const s2 = d._calls.asked[1].match(/then the code (\S+)/)?.[1] ?? '';
+    assert.ok(s1.length > 0 && s2.length > 0, 'both asks carry a sentinel');
+    assert.notEqual(s1, s2, 'post-reset sentinel is FRESH — the old thread sentinel is dead');
+  } finally {
+    (sessionPool as any).get = realGet;
+  }
+});

@@ -54,6 +54,21 @@ export class TabRegistry {
   private tabs = new Map<string, TabSession>();
   /** provider → tabId (one registered tab per provider in v1; multiple allowed). */
   private providerTabs = new Map<ProviderId, string[]>();
+  /**
+   * Reset observers (2026-08-10, ADR 0011 session-sentinel bug): called after a
+   * tab reset navigates to a fresh thread. The per-tab session sentinel is a
+   * THREAD convention — a reset kills the thread, so the next ask must re-inject
+   * the status-line instruction with a NEW sentinel. Without this, the first ask
+   * in a reset tab was sent RAW (no status-line section) and the ADR 0011
+   * reminder fired on the tokenless completion (perplexity live bug).
+   */
+  private resetObservers: Array<(tabId: string) => void> = [];
+
+  /** Subscribe to tab resets (drivers use this to invalidate per-thread state). */
+  onReset(observer: (tabId: string) => void): void {
+    this.resetObservers.push(observer);
+  }
+
 
   // ---------------------------------------------------------------------------
   // query
@@ -226,6 +241,11 @@ export class TabRegistry {
     if (!handle) throw new Error(`no pooled session for tab: ${tabId} — reopen with provider_open`);
     await handle.navigate(entryUrlFor(session.provider), true);
     await new Promise((r) => setTimeout(r, 1500));
+    // 2026-08-10: the thread is dead — notify observers so per-thread state
+    // (session sentinel) is invalidated before the next ask re-injects it.
+    for (const observer of this.resetObservers) {
+      try { observer(tabId); } catch { /* observer errors must not break the reset */ }
+    }
   }
 
   /** Drop all registry entries and pooled sessions (server shutdown). */

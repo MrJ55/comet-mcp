@@ -830,6 +830,14 @@ const pendingAsks = new Map<string, PendingAsk>();
  */
 const sessionSentinels = new Map<string, string>();
 
+// 2026-08-10 (perplexity live bug): a tab reset navigates to a FRESH thread, so
+// the thread-convention sentinel is dead — clear it. The next completionMarker
+// ask must re-inject the status-line instruction (first-in-tab) instead of being
+// sent raw and tripping the ADR 0011 reminder on a tokenless completion.
+tabRegistry.onReset((targetId) => {
+  sessionSentinels.delete(targetId);
+});
+
 /**
  * Reset the pending-ask registry (tests only). The advancer/reminder tests
  * share this module singleton across tests in a file — leftover pending asks
