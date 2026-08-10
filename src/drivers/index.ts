@@ -822,6 +822,15 @@ export const REAPER_INTERVAL_MS = 60 * 1000;
 const pendingAsks = new Map<string, PendingAsk>();
 
 /**
+ * 2026-08-10 (user report): the status-line instruction is a THREAD CONVENTION —
+ * it must be injected ONCE per tab (first completionMarker ask), not re-sent with
+ * every prompt. This maps each tab (targetId) to the session sentinel established
+ * on its first ask; later asks in the same tab reuse it for detection without
+ * re-broadcasting the instruction. Reminders still cover non-compliance.
+ */
+const sessionSentinels = new Map<string, string>();
+
+/**
  * Reset the pending-ask registry (tests only). The advancer/reminder tests
  * share this module singleton across tests in a file — leftover pending asks
  * (e.g. reminder_sent states) would otherwise be swept by a later test's
@@ -831,6 +840,7 @@ export function _resetPendingForTests(): void {
   pendingAsks.clear();
   lastDispatched.clear();
   advancingKeys.clear();
+  sessionSentinels.clear();
 }
 
 /** Key a pending ask by idempotencyKey (replay-safe) or correlationId. */
@@ -863,10 +873,17 @@ export async function dispatchAsk(
     return { correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey, status: 'completed', replayed: true };
   }
 
-  // ADR 0010: optional sentinel completion marker — append the instruction and
-  // carry the sentinel on the pending entry. Absent ⇒ normal heuristic/weak path.
-  const sentinel = opts.completionMarker ? generateSentinel() : undefined;
-  const wirePrompt = sentinel ? withSentinelInstruction(prompt, sentinel) : prompt;
+  // ADR 0010/0011: optional sentinel completion marker. The status-line
+  // instruction is a THREAD CONVENTION — injected ONCE per tab (first
+  // completionMarker ask); later asks reuse the session sentinel for detection
+  // WITHOUT re-broadcasting the instruction (user report 2026-08-10: the full
+  // block was being resubmitted with every prompt). Reminders cover
+  // non-compliance. Absent ⇒ normal heuristic/weak path.
+  const existingSentinel = sessionSentinels.get(session.targetId);
+  const isFirstInTab = opts.completionMarker && existingSentinel === undefined;
+  const sentinel = opts.completionMarker ? (existingSentinel ?? generateSentinel()) : undefined;
+  if (isFirstInTab && sentinel) sessionSentinels.set(session.targetId, sentinel);
+  const wirePrompt = isFirstInTab ? withSentinelInstruction(prompt, sentinel!) : prompt;
 
   // durable lifecycle: envelope.created → send.queued → snapshot → ask → accepted
   recordEnvelopeCreated({ ...envelope, content: wirePrompt });

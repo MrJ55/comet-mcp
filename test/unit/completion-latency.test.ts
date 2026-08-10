@@ -177,14 +177,16 @@ test('amended: NOT a same-prefix superset → returns null (genuinely new turn, 
 // ---------------------------------------------------------------------------
 
 function sentinelDriver(answer: string, comply = true) {
-  const calls = { asked: [], polls: 0 };
-  // the driver echoes the sentinel from the WRAPPED prompt so the response ends
-  // with the SAME sentinel dispatchAsk generated (compliance simulation);
-  // comply=false → the model ignores the instruction (no sentinel)
+  const calls = { asked: [], polls: 0, sentinel: '' };
+  // the driver echoes the SESSION sentinel (captured from the first ask's
+  // instruction) so the response ends with the SAME sentinel dispatchAsk
+  // established for this tab; comply=false → the model ignores it (no sentinel)
   const echoedAnswer = (prompt: string) => {
-    // capture the sentinel: "then the code <X>" in the status-line format
-    const m = prompt.match(/then the code (\S+)/) ?? prompt.match(/exact string (\S+)/);
-    return comply && m ? answer + '\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test Model, 2%, ' + m[1] : answer;
+    if (!calls.sentinel) {
+      const m = prompt.match(/then the code (\S+)/) ?? prompt.match(/exact string (\S+)/);
+      if (m) calls.sentinel = m[1];
+    }
+    return comply && calls.sentinel ? answer + '\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test Model, 2%, ' + calls.sentinel : answer;
   };
   return {
     provider: 'gemini',
@@ -268,10 +270,29 @@ test('ADR 0010: stripSentinel also cleans MARKDOWN content (leak caught live on 
   assert.equal(md2.found, false);
 });
 
+test('ADR 0010/0011 (2026-08-10 user report): status-line instruction injected ONCE per tab — 2nd ask reuses session sentinel, NO re-broadcast', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, _resetPendingForTests } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  _resetPendingForTests();
+  const d = sentinelDriver('Session answer.');
+  const session = await d.open();
+  // first ask in the tab: instruction injected
+  const first = await dispatchAsk(d, session, 'Q1?', { timeoutMs: 60000, completionMarker: true });
+  assert.ok(d._calls.asked[0].includes('end EVERY reply in this session'), 'instruction on the FIRST ask');
+  const firstSentinel = d._calls.asked[0].match(/then the code (\S+)/)?.[1] ?? '';
+  assert.ok(firstSentinel.length > 0, 'sentinel established on first ask');
+  // second ask in the SAME tab: NO re-broadcast, prompt is the raw question
+  await dispatchAsk(d, session, 'Q2?', { timeoutMs: 60000, completionMarker: true });
+  assert.equal(d._calls.asked[1], 'Q2?', 'second ask is the RAW prompt — instruction NOT re-submitted');
+  assert.ok(!d._calls.asked[1].includes('end EVERY reply'), 'no re-broadcast of the status-line instruction');
+});
+
 test('ADR 0010: completionMarker ask — sentinel present → finalizes on FIRST completed poll, sentinel stripped from stored response', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
-  const { dispatchAsk, advanceAsk, isAskPending } = await import('../../dist/drivers/index.js');
+  const { dispatchAsk, advanceAsk, isAskPending, _resetPendingForTests } = await import('../../dist/drivers/index.js');
   _resetForTests();
+  _resetPendingForTests(); // clear sessionSentinels so this tab gets a fresh instruction
   const d = sentinelDriver('A complete answer.');  // driver echoes the dispatch-generated sentinel
   const session = await d.open();
   const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
