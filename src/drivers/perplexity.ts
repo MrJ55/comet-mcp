@@ -161,7 +161,12 @@ const POLL_SCRIPT = `(() => {
     proseHtmls.push(el.innerHTML);
   }
 
-  return { hasActiveStopButton, hasLoadingSpinner, bodyText: body, proseTexts, proseHtmls };
+  // 2026-08-10 (live bug): return a JSON STRING, not a raw object. Large
+  // innerHTML strings can contain U+2028/2029 which break CDP's
+  // returnByValue object serialization (observed: Runtime.evaluate returned
+  // objectId with no value → driver saw empty bodyText → ask stuck WATCHING
+  // forever with the answer on screen). JSON.stringify + parse is immune.
+  return JSON.stringify({ hasActiveStopButton, hasLoadingSpinner, bodyText: body, proseTexts, proseHtmls });
 })()`;
 
 export class PerplexityDriver implements ChatDriver {
@@ -294,7 +299,17 @@ export class PerplexityDriver implements ChatDriver {
     } catch { /* continue without URL */ }
 
     const raw = await handle.safeEvaluate(POLL_SCRIPT);
-    const value = (raw?.result?.value ?? {}) as {
+    // 2026-08-10: POLL_SCRIPT returns a JSON STRING (object serialization broke
+    // on U+2028/2029 in innerHTML — Runtime.evaluate returned objectId, no
+    // value). Parse it here; fall back to the raw object shape defensively.
+    let parsed: Record<string, unknown> | null = null;
+    const rawValue = (raw as any)?.result?.value;
+    if (typeof rawValue === 'string') {
+      try { parsed = JSON.parse(rawValue); } catch { parsed = null; }
+    } else if (rawValue && typeof rawValue === 'object') {
+      parsed = rawValue as Record<string, unknown>;
+    }
+    const value = (parsed ?? {}) as {
       hasActiveStopButton?: boolean;
       hasLoadingSpinner?: boolean;
       bodyText?: string;
@@ -303,6 +318,8 @@ export class PerplexityDriver implements ChatDriver {
     };
 
     const bodyText = value.bodyText ?? '';
+    // TEMP DEBUG (2026-08-10): trace what the driver actually sees
+    console.error('[poll-debug] bodyTextLen=' + bodyText.length, 'prose=' + (value.proseTexts ?? []).length, 'statusMatch=' + !!bodyText.match(/Turn \d+,\s*\d{2}\/\d{2}\/\d{2},[^\n]+(?=[\s\S]*?(?:Ask a follow-up|Sources|Search|$))/));
     // 2026-08-10 (user rule — the CODE is PRIMARY, UI markers are FALLBACK):
     // the status line is the completion contract. It renders OUTSIDE the
     // [class*="prose"] containers (observed live: bodyText ends with it while
@@ -338,7 +355,12 @@ export class PerplexityDriver implements ChatDriver {
     // the marker-ask gate waits/reminds needlessly.
     let response = extraction?.response ?? '';
     const statusLineText = statusLineMatch ? statusLineMatch[0].trim() : '';
-    if (response && statusLineText && !response.includes(statusLineText)) {
+    // 2026-08-10: append UNCONDITIONALLY when detected — the status line can
+    // appear mid-prose (UI-rendered) but stripSentinel requires it at the END.
+    // Dropping it (or skipping when includes() matches mid-body) made a
+    // completed reply look lineless → sentinel never confirmed → gate waited
+    // forever (live bug 2026-08-10, the actual root cause).
+    if (response && statusLineText && !response.trimEnd().endsWith(statusLineText)) {
       response = `${response}\n\n${statusLineText}`;
     }
     // P2 markdown: convert the LAST prose container's innerHTML when completed
