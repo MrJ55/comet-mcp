@@ -363,7 +363,21 @@ test('advancer: a finished ask finalizes via the timer sweep WITHOUT any client 
   const { eventsForCorrelation } = await import('../../dist/core/event-store.js');
   const resp = [...eventsForCorrelation(dispatched.correlationId)].reverse().find((e) => e.type === 'response.received' || e.type === 'response.amended');
   assert.ok(resp?.response?.poll.response.includes('Timer-finalized answer.'), 'response stored');
-  assert.ok(!resp?.response?.poll.response.includes('exact string'), 'sentinel instruction not stored');
+  assert.ok(!resp?.response?.poll.response.includes('Turn 1'), 'status line not stored (event store clean)');
+});
+
+test('advancer: replayOutcomeIfRecorded recovers the CLEAN outcome after server-side finalize (ADR 0011 live bug)', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advancePendingAsks, replayOutcomeIfRecorded } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  const d = sentinelDriver('Clean recovered answer.');
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  await advancePendingAsks(Date.now() + 5000); // advancer finalizes, entry removed
+  const replayed = replayOutcomeIfRecorded(dispatched.idempotencyKey);
+  assert.ok(replayed, 'outcome recoverable by idempotencyKey after advancer finalize');
+  assert.equal(replayed!.response, 'Clean recovered answer.', 'status line stripped in the recovered outcome');
+  assert.ok(!replayed!.response.includes('Turn 1'), 'no status line leak via replay');
 });
 
 test('advancer: age guard — a JUST-dispatched ask is skipped on the first sweep (dispatch→submit window)', async () => {

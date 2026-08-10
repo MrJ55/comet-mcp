@@ -24,7 +24,7 @@ import {
 import { cometClient } from "./cdp-client.js";
 import { tabRegistry } from "./tab-registry.js";
 import { sessionPool } from "./cdp-pool.js";
-import { getDriver, listDrivers, openTab, normalizePrompt, askAndWait, askAndWaitOn, dispatchAsk, advanceAsk, isAskPending, lastDispatchedFor, pendingKeyForCorrelation, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention, recordPollSuccess, startReaper, startAdvancer } from "./drivers/index.js";
+import { getDriver, listDrivers, openTab, normalizePrompt, askAndWait, askAndWaitOn, dispatchAsk, advanceAsk, isAskPending, lastDispatchedFor, pendingKeyForCorrelation, replayOutcomeIfRecorded, renderPoll, renderInProgress, compactAskResult, readResponseChunk, enforceRetention, recordPollSuccess, startReaper, startAdvancer } from "./drivers/index.js";
 import { loadEntry, loadAllEntries, writeEntry } from "./core/registry.js";
 import type { ProviderId } from "./types/conversation.js";
 
@@ -426,6 +426,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             return { content: [{ type: "text", text: renderInProgress(outcome) }] };
           }
           // transient poll failure — keep pending, report current tab state
+        } else if (pendingKey) {
+          // 2026-08-09 (ADR 0011, live-caught): the fast ADVANCER may have already
+          // finalized this ask server-side (pending entry removed, event store
+          // clean, sentinel stripped). Do NOT fall through to a raw driver.poll —
+          // that would re-store the UNSTRIPPED response. Recover the stored outcome
+          // via replayOutcomeIfRecorded (reads the event store by idempotencyKey).
+          const replayed = replayOutcomeIfRecorded(pendingKey);
+          if (replayed) {
+            return { content: [{ type: "text", text: compactAskResult(provider, replayed) }] };
+          }
         }
         const poll = await driver.poll(session);
         recordPollSuccess(session.targetId);
