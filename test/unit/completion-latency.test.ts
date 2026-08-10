@@ -183,8 +183,10 @@ function sentinelDriver(answer: string, comply = true) {
   // established for this tab; comply=false → the model ignores it (no sentinel)
   const echoedAnswer = (prompt: string) => {
     if (!calls.sentinel) {
-      const m = prompt.match(/then the code (\S+)/) ?? prompt.match(/exact string (\S+)/);
-      if (m) calls.sentinel = m[1];
+      // 2026-08-10: the sentinel is a 10-char token right after "context%>, "
+      // (no 'then the code' prefix anymore)
+      const m = prompt.match(/<context%>,\s*([A-Za-z0-9]{10})/) ?? prompt.match(/(\S+)\.\s*$/);
+      calls.sentinel = m?.[1] ?? '';
     }
     return comply && calls.sentinel ? answer + '\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test Model, 2%, ' + calls.sentinel : answer;
   };
@@ -280,7 +282,7 @@ test('ADR 0010/0011 (2026-08-10 user report): status-line instruction injected O
   // first ask in the tab: instruction injected
   const first = await dispatchAsk(d, session, 'Q1?', { timeoutMs: 60000, completionMarker: true });
   assert.ok(d._calls.asked[0].includes('end EVERY reply in this session'), 'instruction on the FIRST ask');
-  const firstSentinel = d._calls.asked[0].match(/then the code (\S+)/)?.[1] ?? '';
+  const firstSentinel = d._calls.asked[0].match(/<context%>,\s*([A-Za-z0-9]{10})/)?.[1] ?? '';
   assert.ok(firstSentinel.length > 0, 'sentinel established on first ask');
   // second ask in the SAME tab: NO re-broadcast of the instruction, but the
   // dispatch TIMESTAMP (2026-08-10 user request) still goes into every prompt.
@@ -305,7 +307,7 @@ test('ADR 0010: completionMarker ask — sentinel present → finalizes on FIRST
   assert.equal(outcome?.response, 'A complete answer.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test Model, 2%', 'sentinel stripped, status line preserved');
   // the sentinel (from the wrapped prompt) must not leak into the response
   const wrappedPrompt = d._calls.asked[0] ?? '';
-  const sentinelInPrompt = wrappedPrompt.match(/then the code (\S+)/)?.[1] ?? '';
+  const sentinelInPrompt = wrappedPrompt.match(/<context%>,\s*([A-Za-z0-9]{10})/)?.[1] ?? '';
   assert.ok(sentinelInPrompt.length > 0, 'sentinel present in wrapped prompt');
   assert.ok(!outcome?.response.includes(sentinelInPrompt), 'no sentinel leak');
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
@@ -357,8 +359,8 @@ test('ADR 0011: reminder loop — injects only when content STABLE (not mid-stre
         return { state: 'completed' as const, completionConfidence: 'heuristic' as const, steps: [], currentStep: '', response: 'First answer, no status line.', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
       }
       // after the reminder (ask #2): now WITH the status line + sentinel
-      const m = calls.asked[1].match(/then the code (\S+)/) ?? calls.asked[1].match(/exact string (\S+)/);
-      const sentinel = m?.[1] ?? 'NOPE';
+      const m = calls.asked[1].match(/<context%>,\s*([A-Za-z0-9]{10})/) ?? calls.asked[1].match(/exact string (\S+)/);
+      const sentinel = (m?.[1] ?? '').replace(/[.)]$/, '') || 'NOPE';
       return { state: 'completed', steps: [], currentStep: '', response: 'First answer, no status line.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test, 2%, ' + sentinel, markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
     },
     stop: async () => true,
@@ -636,8 +638,8 @@ test('2026-08-10 perplexity live bug: tab RESET clears the session sentinel — 
     // ask #2 in the SAME tab after reset: MUST re-inject (new thread, new sentinel)
     await dispatchAsk(d, session, 'Q2?', { timeoutMs: 60000, completionMarker: true });
     assert.ok(d._calls.asked[1].includes('end EVERY reply in this session'), 'post-reset ask re-injects the instruction — NOT sent raw');
-    const s1 = d._calls.asked[0].match(/then the code (\S+)/)?.[1] ?? '';
-    const s2 = d._calls.asked[1].match(/then the code (\S+)/)?.[1] ?? '';
+    const s1 = d._calls.asked[0].match(/<context%>,\s*([A-Za-z0-9]{10})/)?.[1] ?? '';
+    const s2 = d._calls.asked[1].match(/<context%>,\s*([A-Za-z0-9]{10})/)?.[1] ?? '';
     assert.ok(s1.length > 0 && s2.length > 0, 'both asks carry a sentinel');
     assert.notEqual(s1, s2, 'post-reset sentinel is FRESH — the old thread sentinel is dead');
   } finally {
@@ -757,7 +759,7 @@ test('2026-08-10 user rule: the completion gate must NOT depend on poll.state ==
       if (d._calls.polls === 1) return { state: 'idle' as const, steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
       // the answer is fully rendered (with status line) but the driver's state
       // detection is broken — reports idle, weak confidence, empty-ish signals
-      return { state: 'idle' as const, completionConfidence: 'weak' as const, steps: [], currentStep: '', response: 'The full stable answer.\n\nTurn 1, 08/10/26, 12:51 PM EDT, Perplexity, 8%, then the code vLAo2tnDHQ', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+      return { state: 'idle' as const, completionConfidence: 'weak' as const, steps: [], currentStep: '', response: 'The full stable answer.\n\nTurn 1, 08/10/26, 12:51 PM EDT, Perplexity, 8%, vLAo2tnDHQ', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
     },
     stop: async () => true, reset: async () => {},
     health: async () => ({ provider: 'perplexity', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),
@@ -772,7 +774,7 @@ test('2026-08-10 user rule: the completion gate must NOT depend on poll.state ==
   const p1 = await advanceAsk(dispatched.idempotencyKey);
   assert.equal(p1?.completed, true, 'status-line shape present → completes even though poll.state=idle');
   assert.ok(p1?.response.includes('The full stable answer.'), 'delivers the answer');
-  assert.ok(p1?.response.includes('Turn 1, 08/10/26, 12:51 PM EDT, Perplexity, 8%, then the code vLAo2tnDHQ'), 'status line preserved');
+  assert.ok(p1?.response.includes('Turn 1, 08/10/26, 12:51 PM EDT, Perplexity, 8%, vLAo2tnDHQ'), 'status line preserved');
   assert.equal(d._calls.asked.length, 1, 'no reminder — shape-compliant reply completed cleanly');
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
 });
@@ -801,7 +803,7 @@ test('DEBUG SWITCH: COMET_STRICT_COMPLETION_GATE=1 restores the poll.state===\'c
       poll: async () => {
         polls++;
         if (polls === 1) return { state: 'idle', steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
-        return { state: 'idle', completionConfidence: 'weak', steps: [], currentStep: '', response: 'The full stable answer.\\n\\nTurn 1, 08/10/26, 12:51 PM EDT, Perplexity, 8%, then the code vLAo2tnDHQ', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+        return { state: 'idle', completionConfidence: 'weak', steps: [], currentStep: '', response: 'The full stable answer.\\n\\nTurn 1, 08/10/26, 12:51 PM EDT, Perplexity, 8%, vLAo2tnDHQ', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
       },
       stop: async () => true, reset: async () => {},
       health: async () => ({ provider: 'perplexity', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),

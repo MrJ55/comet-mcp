@@ -143,15 +143,14 @@ const POLL_SCRIPT = `(() => {
   // NOTE: no TS type annotations inside injected scripts — they survive verbatim
   // into the browser and throw SyntaxError (2026-08-10: 'el: Element' broke
   // every poll → send.blocked).
-  const isStatusLine = (el) => /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},/.test((el.textContent || '').trim());
-  let currentStart = 0;
-  let seenStatus = 0;
-  for (let i = 0; i < allProse.length; i++) {
-    if (isStatusLine(allProse[i])) {
-      seenStatus++;
-      if (seenStatus === 2) currentStart = i + 1; // second status line = end of previous turn
-    }
-  }
+  // 2026-08-10 (multi-turn scoping bug): Perplexity renders ONE prose element
+  // per turn, each containing the answer + trailing status line. The current
+  // turn is ALWAYS the LAST element (whether completed or still streaming).
+  // Earlier status lines are just turn boundaries — ignore them entirely.
+  // Previously we anchored on status-line positions with a ^-anchored regex
+  // that never matched mid-text status lines, so the whole thread was
+  // collected (observed: seed + Turn 2 + Turn 3 all returned as the response).
+  const currentStart = allProse.length > 0 ? allProse.length - 1 : 0;
   const proseTexts = [];
   const proseHtmls = [];
   for (let i = currentStart; i < allProse.length; i++) {
@@ -389,8 +388,12 @@ export class PerplexityDriver implements ChatDriver {
     // the sentinel survives for the gate's stripSentinel. Lookahead to UI
     // chrome (Sources / Ask a follow-up / EOF) guards against mid-thread
     // matches on older turns.
-    const STATUS_LINE_RE = /Turn \d+,\s*\d{2}\/\d{2}\/\d{2},[^\n]+(?=[\s\S]*?(?:Ask a follow-up|Sources|Search|$))/;
-    const statusLineMatch = bodyText.match(STATUS_LINE_RE);
+    const STATUS_LINE_RE = /Turn \d+,\s*\d{2}\/\d{2}\/\d{2},[^\n]+(?=[\s\S]*?(?:Ask a follow-up|Sources|Search|$))/g;
+    // 2026-08-10 (multi-turn leak): bodyText contains ALL turns' status lines —
+    // take the LAST one (the current turn's), never the first (match() returns
+    // the first; an old turn's line was appended to the response).
+    const statusLineMatches = bodyText.match(STATUS_LINE_RE) ?? [];
+    const statusLineMatch = statusLineMatches.length > 0 ? statusLineMatches[statusLineMatches.length - 1] : null;
     const hasStatusLine = !!statusLineMatch || /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},.*\d+%(?:\s*,\s*\S+)?$/m.test(joinedProse);
     const status = hasStatusLine
       ? { state: 'completed' as const, completionConfidence: 'authoritative' as const }

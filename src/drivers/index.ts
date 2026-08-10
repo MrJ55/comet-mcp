@@ -363,7 +363,7 @@ export function generateSentinel(): string {
  * Tightened for briefness + repeatable results (user request 2026-08-09).
  */
 export function withSentinelInstruction(prompt: string, sentinel: string): string {
-  return `${prompt}\n\n(Technical: end EVERY reply in this session with one final line in this exact format: Turn <N>, <MM/DD/YY>, <time> <timezone>, <your model name>, <context%>, then the code ${sentinel} — nothing after the code. Context% = your session tokens used divided by context window size, as an integer percent.)`;
+  return `${prompt}\n\n(Technical: end EVERY reply in this session with one final line in this exact format: Turn <N>, <MM/DD/YY>, <time> <timezone>, <your model name>, <context%>, ${sentinel} — nothing after it. Context% = your session tokens used divided by context window size, as an integer percent.)`;
 }
 
 /**
@@ -426,7 +426,7 @@ export function parseStatusLineShape(text: string): {
  * the compliance loop re-checks on the next poll.
  */
 export function statusLineReminder(sentinel: string): string {
-  return `(Technical: your previous reply was missing the required final status line that every reply in this session must end with. Reply with ONLY that line, in this exact format: Turn <N>, <MM/DD/YY>, <time> <timezone>, <your model name>, <context%>, then the code ${sentinel} — nothing after the code. Context% = your session tokens used divided by context window size, as an integer percent. Nothing else.)`;
+  return `(Technical: your previous reply was missing the required final status line that every reply in this session must end with. Reply with ONLY that line, in this exact format: Turn <N>, <MM/DD/YY>, <time> <timezone>, <your model name>, <context%>, ${sentinel} — nothing after it. Context% = your session tokens used divided by context window size, as an integer percent. Nothing else.)`;
 }
 
 /**
