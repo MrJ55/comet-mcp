@@ -479,6 +479,66 @@ test('advancer: sweep is bounded per tick (thundering-herd guard)', async () => 
   assert.ok(listPendingAsks().length >= 2, 'leftover asks pending for later sweeps');
 });
 
+test('852f96e regression (2026-08-10 grok live bug): native-marker authoritative with GROWING content must NOT complete/remind until a prior poll confirms (cold-start no-bypass)', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advanceAsk, isAskPending, _resetPendingForTests } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  _resetPendingForTests();
+  // grok renders the timing line at the START of the message while the answer
+  // streams below — so an authoritative native marker ("Worked for Xs") can be
+  // present on the FIRST poll with content that is still growing. The gate must
+  // require a prior poll (prevHash !== null) before hash-confirming: cold-start
+  // completion let the ADR 0011 reminder fire and interrupt grok mid-answer.
+  // NOTE: dispatchAsk consumes ONE snapshot poll; advanceAsk polls come after.
+  const sequence = [
+    'Worked for 3s\n\nThe answer is about',                             // snapshot (before send)
+    'Worked for 3s\n\nThe answer is about the inner solar system,',     // advance #1: cold-start marker, growing
+    'Worked for 3s\n\nThe answer is about the inner solar system, and', // advance #2: still growing
+    'Worked for 3s\n\nMercury is the smallest planet.',                 // advance #3: final content (new hash)
+    'Worked for 3s\n\nMercury is the smallest planet.',                 // advance #4: STABLE — same as #3
+    'Worked for 3s\n\nMercury is the smallest planet.',                 // advance #5: stable again → finalize
+  ];
+  let pollN = 0;
+  const d = {
+    provider: 'grok',
+    open: async () => ({ provider: 'grok', tabId: 't', targetId: 't', cdpSessionId: 'ws://x', openedAt: '', state: 'connected' }),
+    ask: async () => { d._calls.asked.push('Q'); return { receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'sent' as const, recordedAt: '' } }; },
+    poll: async () => {
+      d._calls.polls++;
+      const response = sequence[Math.min(pollN++, sequence.length - 1)];
+      return { state: 'completed' as const, completionConfidence: 'authoritative' as const, steps: [], currentStep: '', response, markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+    },
+    stop: async () => true, reset: async () => {},
+    health: async () => ({ provider: 'grok', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),
+    _calls: { asked: [] as string[], polls: 0 },
+  } as any;
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  // advance #1: native marker on COLD START → must NOT complete, must NOT remind (852f96e)
+  const p1 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p1?.completed, false, 'native marker on cold start must NOT complete mid-stream');
+  assert.equal(p1?.status, 'confirming', 'reports confirming while content streams');
+  assert.equal(d._calls.asked.length, 1, 'NO reminder fired on cold-start marker');
+  // advances #2-#3: content keeps growing → hash-confirmation fails, still no reminder
+  const p2 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p2?.completed, false, 'advance #2 (grew): NOT complete');
+  const p3 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p3?.completed, false, 'advance #3 (grew): NOT complete');
+  assert.equal(d._calls.asked.length, 1, 'reminder NEVER fired while content grew — grok not interrupted');
+  // advance #4: first STABLE poll → hash-confirmed authoritative ⇒ gate passes,
+  // but the model never emitted the sentinel ⇒ bounded ADR 0011 reminder fires
+  const p4 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p4?.completed, false, 'stable content: gate passes, but reminder still pending');
+  assert.equal(p4?.status, 'reminder_sent', 'bounded reminder fires only AFTER stability confirmed');
+  assert.equal(d._calls.asked.length, 2, 'exactly one reminder ask');
+  // advance #5: reminder already sent → finalizes completed with the full answer
+  const p5 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p5?.completed, true, 'stable content with prior poll → hash-confirmed authoritative completes');
+  assert.ok(p5?.response.includes('Mercury is the smallest planet.'), 'full answer returned');
+  assert.equal(d._calls.asked.length, 2, 'completion achieved without extra reminder asks');
+  assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
+});
+
 test('ADR 0011 guard (2026-08-10 grok live bug): UNVERIFIED send must NOT trigger the reminder loop', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
   const { dispatchAsk, advanceAsk, isAskPending } = await import('../../dist/drivers/index.js');
