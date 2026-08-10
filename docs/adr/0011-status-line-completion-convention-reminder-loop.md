@@ -31,9 +31,15 @@ injects a bounded follow-up asking for it, then re-polls.
    completeness (all six fields), extracts turn/date/time/model/contextPct.
    Completion keys on the sentinel; field completeness is observability + the
    reminder trigger, never a completion gate.
-3. **Full-line strip** — `stripSentinel` now removes the ENTIRE status line
-   (from the last `\n` before the sentinel), text and markdown, before hashing/
-   persistence/relay. No sentinel or status-line leak.
+3. **Sentinel-only strip — status line PRESERVED** (amended 2026-08-10): `stripSentinel`
+   removes ONLY the sentinel token + its trailing separator, keeping the full
+   status line in the response, event store, and relayed content. The sentinel is
+   a control artifact (completion detection) that must never leak; the status
+   line is PROVENANCE (which model, when, context pressure) — useful when pulling
+   an answer and self-attesting source attribution when relaying (the receiving
+   model sees "Grok 4.5, 2%" in the content). Caveat: model/context% are
+   self-reported estimates (claude flagged this) — provenance flavor, never
+   trusted over the server's own records.
 4. **Bounded reminder loop** — when a completed reply lacks the sentinel and a
    reminder was not yet sent, `advanceAsk` injects ONE `statusLineReminder`
    (asks for ONLY the line, verbatim) and stays pending; the next poll re-checks.

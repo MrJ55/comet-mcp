@@ -233,12 +233,13 @@ test('ADR 0011: parseStatusLine — full line parsed, partial line flagged incom
   assert.equal(none.found, false);
 });
 
-test('ADR 0011: stripSentinel removes the FULL status line (not just the token)', async () => {
+test('ADR 0011 amendment: stripSentinel removes ONLY the token — status line PRESERVED (2026-08-10)', async () => {
   const { stripSentinel } = await import('../../dist/drivers/index.js');
   const r = stripSentinel('Answer text.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Grok 4.5, 2%, Zz9Xq2Gm', 'Zz9Xq2Gm');
   assert.equal(r.found, true);
-  assert.equal(r.text, 'Answer text.');
-  assert.ok(!r.text.includes('Turn 1'), 'whole status line stripped');
+  assert.equal(r.text, 'Answer text.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Grok 4.5, 2%', 'sentinel + separator removed, status line kept');
+  assert.ok(!r.text.includes('Zz9Xq2Gm'), 'sentinel token never leaks');
+  assert.ok(r.text.includes('Turn 1'), 'status line preserved as provenance');
   // bare token still handled
   const bare = stripSentinel('Answer.\n\nZz9Xq2Gm', 'Zz9Xq2Gm');
   assert.equal(bare.found, true);
@@ -278,7 +279,7 @@ test('ADR 0010: completionMarker ask — sentinel present → finalizes on FIRST
   assert.ok(d._calls.asked[0].includes('end EVERY reply in this session'), 'prompt wrapped with all-turns status line');
   const outcome = await advanceAsk(dispatched.idempotencyKey);
   assert.equal(outcome?.completed, true, 'sentinel ⇒ authoritative ⇒ completes on first completed poll (no 8s window)');
-  assert.equal(outcome?.response, 'A complete answer.', 'full status line stripped from the surfaced response');
+  assert.equal(outcome?.response, 'A complete answer.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test Model, 2%', 'sentinel stripped, status line preserved');
   // the sentinel (from the wrapped prompt) must not leak into the response
   const wrappedPrompt = d._calls.asked[0] ?? '';
   const sentinelInPrompt = wrappedPrompt.match(/then the code (\S+)/)?.[1] ?? '';
@@ -339,7 +340,8 @@ test('ADR 0011: reminder loop — model complies after the reminder → finalize
   assert.equal(first?.status, 'reminder_sent', 'reminder injected');
   const second = await advanceAsk(dispatched.idempotencyKey);
   assert.equal(second?.completed, true, 'compliance after reminder ⇒ finalizes');
-  assert.equal(second?.response, 'First answer, no status line.', 'status line stripped, original answer preserved');
+  assert.equal(second?.response, 'First answer, no status line.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test, 2%', 'sentinel stripped, status line preserved');
+  assert.ok(!second?.response.includes('NOPE'), 'no sentinel leak');
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized after reminder loop');
 });
 
@@ -363,7 +365,8 @@ test('advancer: a finished ask finalizes via the timer sweep WITHOUT any client 
   const { eventsForCorrelation } = await import('../../dist/core/event-store.js');
   const resp = [...eventsForCorrelation(dispatched.correlationId)].reverse().find((e) => e.type === 'response.received' || e.type === 'response.amended');
   assert.ok(resp?.response?.poll.response.includes('Timer-finalized answer.'), 'response stored');
-  assert.ok(!resp?.response?.poll.response.includes('Turn 1'), 'status line not stored (event store clean)');
+  assert.ok(resp?.response?.poll.response.includes('Turn 1'), 'status line preserved in event store (provenance)');
+  assert.ok(!resp?.response?.poll.response.includes('exact string') && !/\b[A-Za-z0-9]{10}\b/.test(resp?.response?.poll.response.replace('Timer-finalized answer.', '')), 'no sentinel token in stored response');
 });
 
 test('advancer: replayOutcomeIfRecorded recovers the CLEAN outcome after server-side finalize (ADR 0011 live bug)', async () => {
@@ -376,8 +379,9 @@ test('advancer: replayOutcomeIfRecorded recovers the CLEAN outcome after server-
   await advancePendingAsks(Date.now() + 5000); // advancer finalizes, entry removed
   const replayed = replayOutcomeIfRecorded(dispatched.idempotencyKey);
   assert.ok(replayed, 'outcome recoverable by idempotencyKey after advancer finalize');
-  assert.equal(replayed!.response, 'Clean recovered answer.', 'status line stripped in the recovered outcome');
-  assert.ok(!replayed!.response.includes('Turn 1'), 'no status line leak via replay');
+  assert.ok(replayed!.response.includes('Clean recovered answer.'), 'answer present');
+  assert.ok(replayed!.response.includes('Turn 1'), 'status line preserved via replay');
+  assert.ok(!/\b[A-Za-z0-9]{10}\b/.test(replayed!.response.replace('Clean recovered answer.', '')), 'no sentinel token in replayed outcome');
 });
 
 test('advancer: age guard — a JUST-dispatched ask is skipped on the first sweep (dispatch→submit window)', async () => {
@@ -391,6 +395,29 @@ test('advancer: age guard — a JUST-dispatched ask is skipped on the first swee
   const advanced = await advancePendingAsks(Date.now());
   assert.equal(advanced, 0, 'too-young ask not advanced (would race driver.ask submission)');
   assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending');
+});
+
+test('ADR 0011 amendment: relayed envelope carries the source STATUS LINE as provenance, never the sentinel', async () => {
+  const { _resetForTests, recordEnvelopeCreated, recordSendEvent, recordResponseReceived, recordDeliveryReceipt } = await import('../../dist/core/event-store.js');
+  const { makeEnvelope } = await import('../../dist/drivers/index.js');
+  const { prepareRelay } = await import('../../dist/core/relay.js');
+  _resetForTests();
+  // a completed source whose response ends with a status line (sentinel stripped at
+  // finalize, line preserved — this is the stored shape after the ADR 0011 amendment)
+  const env = makeEnvelope('grok', 'relay-src');
+  recordEnvelopeCreated(env);
+  recordSendEvent(env, 'send.accepted');
+  recordResponseReceived(env, 'grok', {
+    messageId: 'pm-1', contentHash: 'ch-1', cursor: 'cur', state: 'completed',
+    text: 'Source answer.\n\nTurn 2, 08/09/26, 10:53 PM CEST, Grok 4.5, 2%', steps: [],
+  }, 'tab-1');
+  recordDeliveryReceipt({ receiptId: 'r', envelopeId: env.idempotencyKey, correlationId: env.correlationId, idempotencyKey: env.idempotencyKey, status: 'completed', recordedAt: new Date().toISOString() });
+  const result = await prepareRelay({ sourceCorrelationId: env.correlationId, destination: 'claude', attributionHeader: 'grok via relay to claude' });
+  assert.ok(result.ok, 'relay prepared');
+  const r = result as Extract<typeof result, { ok: true }>;
+  // the relayed content carries the source's status line (self-attesting provenance)
+  assert.ok(r.envelope.content.includes('Turn 2, 08/09/26, 10:53 PM CEST, Grok 4.5, 2%'), 'source status line relayed — receiver knows the origin');
+  assert.ok(!/\b[A-Za-z0-9]{10}\b/.test(r.envelope.content), 'no sentinel token in relayed content');
 });
 
 test('advancer: sweep is bounded per tick (thundering-herd guard)', async () => {

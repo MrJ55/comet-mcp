@@ -389,19 +389,21 @@ export function statusLineReminder(sentinel: string): string {
 }
 
 /**
- * Strip the trailing STATUS LINE (not just the token) from the END of a
- * response, if present (ADR 0010/0011). Removes the entire final line that ends
- * with the sentinel — text and markdown. Must run BEFORE hashing/persistence/
- * relay so stored content is clean. Also handles the bare-token case.
+ * Strip the trailing SENTINEL TOKEN (not the status line) from the END of a
+ * response, if present (ADR 0010/0011 amendment 2026-08-10). The sentinel is a
+ * control artifact (completion detection) — it must NOT leak into storage,
+ * replay, or relay. The STATUS LINE itself (Turn/date/time/model/context%) is
+ * KEPT: it is provenance (which model, when, context pressure) — useful when
+ * pulling the answer and self-attesting source attribution when relaying.
+ * Runs BEFORE hashing/persistence/relay. Handles the bare-token case (no line).
  */
 export function stripSentinel(text: string, sentinel: string): { text: string; found: boolean } {
   if (!sentinel) return { text, found: false };
   const trimmed = text.trimEnd();
   if (!trimmed.endsWith(sentinel)) return { text, found: false };
-  // cut from the start of the sentinel's line (the last \n before the token)
-  const fromIndex = trimmed.length - sentinel.length - 1;
-  const lineStart = trimmed.lastIndexOf('\n', fromIndex) + 1;
-  const without = trimmed.slice(0, lineStart).replace(/\n+$/, '');
+  // remove ONLY the token + the separator right before it (", " or whitespace),
+  // leaving the status line intact: "...2%, <token>" → "...2%"
+  const without = trimmed.slice(0, -sentinel.length).replace(/[,\s]+$/, '');
   return { text: without, found: true };
 }
 
