@@ -561,6 +561,46 @@ test('ADR 0011 guard (2026-08-10 grok live bug): UNVERIFIED send must NOT trigge
   assert.notEqual(outcome?.status, 'reminder_sent', 'phantom send must NOT enter the compliance loop');
 });
 
+test('2026-08-10 user report: status-line SHAPE without the token (Turn N, date, time, model, %) is COMPLIANT-ENOUGH — no ADR 0011 reminder fires, reply completes via stability path', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advanceAsk, isAskPending, _resetPendingForTests } = await import('../../dist/drivers/index.js');
+  const { parseStatusLineShape } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  _resetPendingForTests();
+  // parser: shape WITHOUT token is detected; non-shape is not
+  assert.equal(parseStatusLineShape('Answer.\n\nTurn 6, 08/10/26, 9:07 AM EDT, Perplexity, 12%').found, true, 'status-line shape w/o token detected');
+  assert.equal(parseStatusLineShape('Answer.\n\nTurn 6, 08/10/26, 9:07 AM EDT, Perplexity, 12%, AbCdEfGhIj').found, true, 'shape WITH token also detected');
+  assert.equal(parseStatusLineShape('Just an answer.').found, false, 'plain answer is not shape-compliant');
+  // e2e: model ends with a shape line but NO sentinel token → reminder must NOT fire
+  let pollN = 0;
+  const d = {
+    provider: 'perplexity',
+    open: async () => ({ provider: 'perplexity', tabId: 't', targetId: 't', cdpSessionId: 'ws://x', openedAt: '', state: 'connected' }),
+    ask: async () => { d._calls.asked.push('Q'); return { receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'sent' as const, recordedAt: '' } }; },
+    poll: async () => {
+      d._calls.polls++;
+      // first poll = before-snapshot (empty), then completed with the shape line
+      if (d._calls.polls === 1) return { state: 'idle', steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+      return { state: 'completed', completionConfidence: 'heuristic' as const, steps: [], currentStep: '', response: 'The answer.\n\nTurn 6, 08/10/26, 9:07 AM EDT, Perplexity, 12%', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+    },
+    stop: async () => true, reset: async () => {},
+    health: async () => ({ provider: 'perplexity', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),
+    _calls: { asked: [] as string[], polls: 0 },
+  } as any;
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  // heuristic window needs ~3s of stability → poll, wait, poll again
+  const p1 = await advanceAsk(dispatched.idempotencyKey);
+  assert.notEqual(p1?.status, 'reminder_sent', 'no reminder on first completed poll');
+  await new Promise((r) => setTimeout(r, 3200));
+  const p2 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p2?.completed, true, 'shape-compliant reply completes via the stability path');
+  assert.notEqual(p2?.status, 'reminder_sent', 'shape-compliant → NO reminder injected (user report fix)');
+  assert.equal(d._calls.asked.length, 1, 'exactly one ask — no reminder prompt ever sent');
+  assert.ok(p2?.response.includes('Turn 6, 08/10/26, 9:07 AM EDT, Perplexity, 12%'), 'status line preserved');
+  assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
+});
+
 test('2026-08-10 perplexity live bug: tab RESET clears the session sentinel — next completionMarker ask RE-INJECTS the status-line instruction (fresh thread, fresh sentinel)', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
   const { dispatchAsk, _resetPendingForTests } = await import('../../dist/drivers/index.js');

@@ -33,7 +33,20 @@ export function makeHandle(
     url: 'https://fixture.test/',
   });
   const win = dom.window as unknown as Window & { execCommandShim: boolean };
-  (win.document as any).execCommand = () => true; // jsdom has no execCommand
+  (win.document as any).execCommand = (cmd: string, _ui: unknown, text?: string) => {
+    // jsdom has no execCommand. Simulate insertText by writing into the focused
+    // editable (browser semantics) — the real in-page scripts and the
+    // promptLandedIn guard (2026-08-10) read innerText back after typing.
+    if (cmd === 'insertText' && typeof text === 'string') {
+      const active = (win as any).document.activeElement;
+      if (active && (active.getAttribute('contenteditable') === 'true' || active.matches('[contenteditable]'))) {
+        active.textContent = (active.textContent || '') + text;
+      } else if (active && ('value' in active)) {
+        active.value = (active.value || '') + text;
+      }
+    }
+    return true;
+  };
 
   // jsdom lacks innerText and always-null offsetParent — shim to browser semantics
   // so the real in-page scripts (which read innerText / offsetParent) behave as

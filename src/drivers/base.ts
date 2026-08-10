@@ -201,6 +201,16 @@ export abstract class BaseChatDriver implements ChatDriver {
     if (!typed) {
       return blockedReceipt(`Failed to type into the ${this.provider} composer`);
     }
+    // 2026-08-10 (user report, perplexity fresh-tab): verify the prompt text
+    // actually LANDED in the composer before submitting. composer-emptied as
+    // the ONLY verification false-positives when the composer was ALREADY empty
+    // (fresh tab, typeInto hit the wrong/not-ready element) — the ask then
+    // claims 'sent' while nothing ever rendered, and the ADR 0011 reminder
+    // injects technical prompts into a thread that never got the real question.
+    const landed = await this.promptLandedIn(handle, composer, prompt);
+    if (!landed) {
+      return blockedReceipt(`Prompt text not detected in the ${this.provider} composer — NOT submitting (fresh-tab false-positive guard)`);
+    }
 
     const submitted = await this.submitLadder(handle, composer, driver);
     return {
@@ -214,6 +224,24 @@ export abstract class BaseChatDriver implements ChatDriver {
           : 'Submission uncertain',
       },
     };
+  }
+
+  /**
+   * 2026-08-10: confirm the typed prompt is actually present in the composer
+   * element. Guards the fresh-tab false-positive where typeInto reports success
+   * but the text never rendered (composer not ready / wrong element).
+   */
+  protected async promptLandedIn(handle: TabCDPHandle, composer: string, prompt: string): Promise<boolean> {
+    const sample = prompt.slice(0, 30).replace(/[`\\$]/g, '');
+    const v = await this.evalValue(handle, `(() => {
+      const el = document.querySelector(${JSON.stringify(composer)});
+      if (!el) return false;
+      const editable = el.matches('[contenteditable]') ? el : (el.querySelector('[contenteditable]') || el);
+      const val = (editable.tagName === 'TEXTAREA' || editable.tagName === 'INPUT')
+        ? (editable.value || '') : (editable.innerText || '');
+      return val.includes(${JSON.stringify(sample)});
+    })()`);
+    return v === true;
   }
 
   /** Type into the composer per driver.typing mode. */

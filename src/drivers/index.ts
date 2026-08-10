@@ -379,6 +379,31 @@ export function parseStatusLine(text: string, sentinel: string): {
 }
 
 /**
+ * 2026-08-10 (perplexity live bug, user report): detect a trailing status-line
+ * SHAPE without requiring the sentinel token. The model followed the convention
+ * (Turn <N>, <MM/DD/YY>, <time> <tz>, <model>, <context%>) but dropped the
+ * control token — that is COMPLIANT-enough: the line is present, so the ADR
+ * 0011 reminder must NOT fire (it interrupts the thread for nothing). The
+ * reply still completes through the normal stability window / hash-confirm.
+ */
+export function parseStatusLineShape(text: string): {
+  found: boolean;
+  line?: string;
+} {
+  const trimmed = text.trimEnd();
+  if (!trimmed) return { found: false };
+  const lines = trimmed.split('\n');
+  const lastLine = lines[lines.length - 1] ?? '';
+  // Turn <N>, <MM/DD/YY>, <time> <tz>, <model>, <context%>  (5 parts, NO token)
+  if (!/^Turn \d+/.test(lastLine)) return { found: false };
+  const parts = lastLine.split(',').map((p) => p.trim());
+  if (parts.length < 5) return { found: false };
+  const [turn, date, time, model, contextPct] = parts;
+  const ok = !!turn && /^\d{2}\/\d{2}\/\d{2}$/.test(date ?? '') && !!time && !!model && /^\d+%$/.test(contextPct ?? '');
+  return ok ? { found: true, line: lastLine } : { found: false };
+}
+
+/**
  * The reminder prompt (ADR 0011): injected into the thread when a completed
  * reply is missing the status line. Asks for ONLY the status line, verbatim
  * format, same sentinel. The model's reply should itself end with the line —
@@ -1072,7 +1097,12 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
       // bounded reminder asking for ONLY the status line, keep the ask pending,
       // and re-check on the next poll. Only for completionMarker asks with a
       // verified send; never mid-stream (the gate already proved completion).
-      if (p.sentinel && !sentinelConfirmed && !p.reminderSent && p.sendVerified) {
+      // 2026-08-10 amendment (user report): a status-line SHAPE without the
+      // token is COMPLIANT-ENOUGH — the model followed the convention, just
+      // dropped the control artifact. No reminder; the reply completes through
+      // the stability/hash path instead (parseStatusLineShape).
+      const shapeCompliant = parseStatusLineShape(poll.response).found;
+      if (p.sentinel && !sentinelConfirmed && !shapeCompliant && !p.reminderSent && p.sendVerified) {
         p.reminderSent = true;
         recordSendEvent({ ...envelope, content: p.prompt }, 'send.queued');
         await driver.ask(session, statusLineReminder(p.sentinel));
