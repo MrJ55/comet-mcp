@@ -118,12 +118,39 @@ bounded reminder still fire. The `poll.state` label no longer gates anything.
 reproduced in isolation (the fallback would otherwise mask it). Read once at module
 load; the test spawns a child process with the env set to verify.
 
+## Amendment 2 — the submission bug + phantom-module fix (live-verified through the real bridge)
+
+A third bug, user-reported during the gate tests: **prompts weren't being submitted** —
+`execCommand('insertText')` set the DOM but did NOT fire React's onChange, so Perplexity
+never enabled the Submit button / registered the text; Enter no-op'd; and the submit
+fallthrough returned `true` unconditionally → `send.accepted` recorded while nothing
+was submitted (no response, prompt stuck in the composer). Fixed in `0cc93db`:
+
+1. **InputEvent dispatch** after typing (`editable.dispatchEvent(new InputEvent('input',
+   { inputType: 'insertText', data }))`) so React registers the value and enables Submit.
+2. **Submit verification** — the click/Enter paths now verify the composer actually
+   emptied before returning `true` (no blind success).
+3. **currentPollScript()** — reads the POLL_SCRIPT from dist on disk at runtime instead
+   of the module constant, eliminating the phantom-module staleness that made the
+   driver evaluate an old script (2945 chars / object return) even in fresh processes.
+
+**Live-verified through the REAL MCP bridge** (no gateway bypass): a CONFIRMED ask
+completed in **4 seconds** (`send.accepted 19:28:09 → response.received 19:28:13`),
+response `CONFIRMED` + `Turn 1, ... 1%, then the code` (sentinel stripped, line
+preserved), no WATCHING / no phantom / no reminder. Both gate modes verified at the
+driver level: `COMET_STRICT_COMPLETION_GATE=0` (default, content-driven) completes
+immediately; `=1` (strict, old behavior) stays stuck — the switch reproduces the
+original bug for diagnosis.
+
 ## Reproduction
 
 ```bash
 npm run build
 node --test test/unit/*.test.ts              # 240/240
 node test/integration/probe-perplexity-status.mjs   # probes the live tab directly
+# standalone driver-level gate test (fresh perplexity thread per run):
+COMET_STRICT_COMPLETION_GATE=0 node test/integration/standalone-perplexity-test.mjs
+COMET_STRICT_COMPLETION_GATE=1 node test/integration/standalone-perplexity-test.mjs
 # to reproduce the ORIGINAL state-detection hang in isolation:
 COMET_STRICT_COMPLETION_GATE=1 node dist/index.js
 ```
