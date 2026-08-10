@@ -303,11 +303,25 @@ export class PerplexityDriver implements ChatDriver {
     };
 
     const bodyText = value.bodyText ?? '';
-    const status = determineStatus({
+    let status = determineStatus({
       hasActiveStopButton: value.hasActiveStopButton === true,
       hasLoadingSpinner: value.hasLoadingSpinner === true,
       bodyText,
     });
+    // 2026-08-10 (user rule, repeated live failures): the STATUS LINE is the
+    // completion contract, not the UI markers. determineStatus keys on fragile
+    // UI text ("Ask a follow-up", "Finished", stop-button, spinner) which may
+    // never appear on fast answers or after UI drift — the poll then reports
+    // idle/working forever even though the reply (with its trailing status
+    // line) is fully rendered. Override: if the current-turn prose ends with a
+    // status-line shape, the turn is DONE — report completed + authoritative
+    // (the gate then confirms the sentinel/shape against the ask's own token).
+    if (status.state !== 'completed') {
+      const joined = (value.proseTexts ?? []).join('\n\n').trimEnd();
+      if (/^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},.*\d+%(?:\s*,\s*\S+)?$/m.test(joined)) {
+        status = { state: 'completed', completionConfidence: 'authoritative' };
+      }
+    }
     const { steps, currentStep } = extractSteps(bodyText);
     const extraction = status.state === 'completed' ? extractResponse(value.proseTexts ?? []) : null;
     // P2 markdown: convert the LAST prose container's innerHTML when completed
