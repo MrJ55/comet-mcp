@@ -304,16 +304,20 @@ export class PerplexityDriver implements ChatDriver {
 
     const bodyText = value.bodyText ?? '';
     // 2026-08-10 (user rule — the CODE is PRIMARY, UI markers are FALLBACK):
-    // ALWAYS extract the current-turn prose first; if it ends with a
-    // status-line shape (Turn N, date, time, model, %[, code]) the turn is
-    // COMPLETE and authoritative — the gate confirms the ask's own sentinel
-    // against it. determineStatus (UI markers: "Ask a follow-up", "Finished",
-    // stop-button, spinner) is consulted ONLY as fallback when no status line
-    // is present — those markers may never appear on fast answers or after UI
-    // drift, and gating extraction on them hid the rendered reply (live bug
+    // the status line is the completion contract. It renders OUTSIDE the
+    // [class*="prose"] containers (observed live: bodyText ends with it while
+    // prose has zero status-line elements) — so detect it in BODY TEXT, which
+    // always contains it, allowing trailing UI chrome ("Sources", "Ask a
+    // follow-up", "Search"...) after the line. When present ⇒ COMPLETE and
+    // authoritative; the gate confirms the ask's own sentinel against it.
+    // determineStatus (UI markers) is consulted ONLY as fallback when no status
+    // line is present — those markers may never appear on fast answers or after
+    // UI drift, and gating extraction on them hid the rendered reply (live bug
     // 2026-08-10: ask stuck WATCHING forever with the answer on screen).
     const joinedProse = (value.proseTexts ?? []).join('\n\n').trimEnd();
-    const hasStatusLine = /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},.*\d+%(?:\s*,\s*\S+)?$/m.test(joinedProse);
+    // status line anywhere in body, followed only by UI residue to EOF
+    const STATUS_LINE_RE = /Turn \d+,\s*\d{2}\/\d{2}\/\d{2},[^\n]*\d+%(?:,\s*\S+)?(?=[\s\S]*?(?:Ask a follow-up|Sources|Search|$))/;
+    const hasStatusLine = STATUS_LINE_RE.test(bodyText) || /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},.*\d+%(?:\s*,\s*\S+)?$/m.test(joinedProse);
     const status = hasStatusLine
       ? { state: 'completed' as const, completionConfidence: 'authoritative' as const }
       : determineStatus({
