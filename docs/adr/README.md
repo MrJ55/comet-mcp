@@ -12,4 +12,5 @@ Create one short decision record per material choice, such as the concurrency ce
 - [0008: P4 safe relay — envelope-hash approval binding, single-use CAS, and reconciliation](0008-p4-safe-relay-envelope-hash-approval-cas.md) — accepted 2026-08-09
 - [0009: Confidence-tiered completion finalization (latency fix)](0009-confidence-tiered-completion-finalization.md) — accepted 2026-08-09
 - [0010: Sentinel completion marker (authoritative completion for base providers)](0010-sentinel-completion-marker.md) — accepted 2026-08-09
+- [0011: Status-line completion convention + bounded reminder loop](0011-status-line-completion-convention-reminder-loop.md) — accepted 2026-08-09
 

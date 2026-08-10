@@ -338,30 +338,71 @@ export function generateSentinel(): string {
 }
 
 /**
- * Append the sentinel instruction to a prompt (ADR 0010). The instruction is a
- * technical directive the model complies with by ending its response with the
- * exact string — verified live on gemini/chatgpt/claude (2026-08-09).
+ * Append the status-line instruction to a prompt (ADR 0010/0011). The
+ * instruction establishes a THREAD CONVENTION: every reply in this session ends
+ * with one status line (turn, MM/DD/YY, time+timezone, model, context%, then
+ * the sentinel LAST). Verified live on grok/perplexity (full compliance) and
+ * claude (partial — honest about estimates, 2026-08-09). Context% is the model's
+ * own estimate of tokens-used ÷ window — observability, never trusted as truth.
+ * Tightened for briefness + repeatable results (user request 2026-08-09).
  */
 export function withSentinelInstruction(prompt: string, sentinel: string): string {
-  return `${prompt}\n\n(Technical: end your response with the exact string ${sentinel} — nothing after it.)`;
+  return `${prompt}\n\n(Technical: end EVERY reply in this session with one final line in this exact format: Turn <N>, <MM/DD/YY>, <time> <timezone>, <your model name>, <context%>, then the code ${sentinel} — nothing after the code. Context% = your session tokens used divided by context window size, as an integer percent.)`;
 }
 
 /**
- * Strip a sentinel from the END of a response, if present (ADR 0010). Returns
- * the cleaned text and whether the sentinel was found. Handles the model
- * placing the sentinel on its own line and trailing whitespace/newlines after
- * it (verified live: "…answer.\n\n<sentinel>"). The sentinel must be stripped
- * BEFORE hashing/persistence/relay so stored content is clean.
+ * Parse a response's trailing status line (ADR 0011). Returns whether the line
+ * is present, whether it is COMPLETE (all six fields), and the parsed fields.
+ * Completion detection keys on the sentinel presence; field completeness is
+ * observability + the reminder trigger, never a gate on completion itself.
+ */
+export function parseStatusLine(text: string, sentinel: string): {
+  found: boolean;
+  complete: boolean;
+  line?: string;
+  turn?: string;
+  date?: string;
+  time?: string;
+  model?: string;
+  contextPct?: string;
+} {
+  if (!sentinel) return { found: false, complete: false };
+  const trimmed = text.trimEnd();
+  if (!trimmed.endsWith(sentinel)) return { found: false, complete: false };
+  const lines = trimmed.split('\n');
+  const lastLine = lines[lines.length - 1] ?? '';
+  if (!lastLine.includes(sentinel)) return { found: false, complete: false };
+  const parts = lastLine.split(',').map((p) => p.trim());
+  const [turn, date, time, model, contextPct] = parts;
+  const complete = parts.length >= 6 && !!turn && !!date && !!time && !!model && !!contextPct;
+  return { found: true, complete, line: lastLine, turn, date, time, model, contextPct };
+}
+
+/**
+ * The reminder prompt (ADR 0011): injected into the thread when a completed
+ * reply is missing the status line. Asks for ONLY the status line, verbatim
+ * format, same sentinel. The model's reply should itself end with the line —
+ * the compliance loop re-checks on the next poll.
+ */
+export function statusLineReminder(sentinel: string): string {
+  return `(Technical: your previous reply was missing the required final status line that every reply in this session must end with. Reply with ONLY that line, in this exact format: Turn <N>, <MM/DD/YY>, <time> <timezone>, <your model name>, <context%>, then the code ${sentinel} — nothing after the code. Context% = your session tokens used divided by context window size, as an integer percent. Nothing else.)`;
+}
+
+/**
+ * Strip the trailing STATUS LINE (not just the token) from the END of a
+ * response, if present (ADR 0010/0011). Removes the entire final line that ends
+ * with the sentinel — text and markdown. Must run BEFORE hashing/persistence/
+ * relay so stored content is clean. Also handles the bare-token case.
  */
 export function stripSentinel(text: string, sentinel: string): { text: string; found: boolean } {
   if (!sentinel) return { text, found: false };
   const trimmed = text.trimEnd();
-  if (trimmed.endsWith(sentinel)) {
-    // remove the sentinel + any newlines immediately before it (its own line)
-    const without = trimmed.slice(0, -sentinel.length).replace(/\n+$/, '');
-    return { text: without, found: true };
-  }
-  return { text, found: false };
+  if (!trimmed.endsWith(sentinel)) return { text, found: false };
+  // cut from the start of the sentinel's line (the last \n before the token)
+  const fromIndex = trimmed.length - sentinel.length - 1;
+  const lineStart = trimmed.lastIndexOf('\n', fromIndex) + 1;
+  const without = trimmed.slice(0, lineStart).replace(/\n+$/, '');
+  return { text: without, found: true };
 }
 
 /** Clean up expired + over-count responses on startup and after each write. */
@@ -690,6 +731,9 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
 export function renderInProgress(outcome: AskOutcome, useCometNames = false): string {
   const stop = useCometNames ? 'comet_stop' : 'provider_stop';
   const poll = useCometNames ? 'comet_poll' : 'provider_poll';
+  if (outcome.status === 'reminder_sent') {
+    return `Model reply missing the required status line — a bounded reminder was injected asking for it. Re-polling…\nStatus: REMINDER_SENT\n\nUse ${poll} to continue (the model's next reply should carry the status line).`;
+  }
   if (outcome.status === 'timed_out') {
     return `Ask deadline expired — soft expiry, still watching the tab for a late completion.\nStatus: TIMED_OUT (watching)\n\nUse ${poll} again to recover the answer if it lands late, or ${stop} to cancel.`;
   }
@@ -750,6 +794,11 @@ interface PendingAsk {
    * Absent (non-compliant model) ⇒ falls back to the provider's heuristic/weak.
    */
   sentinel?: string;
+  /**
+   * ADR 0011: true once the status-line reminder has been injected for a
+   * non-compliant reply. Bounded — one reminder per ask, then fall back.
+   */
+  reminderSent?: boolean;
 }
 
 /**
@@ -917,6 +966,13 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   // stored content/hash/relay are clean, and mark confidence authoritative so
   // the gate is hash-confirmed + timer-free. Non-compliant model (no sentinel)
   // → unchanged fallback (provider heuristic/weak).
+  // ADR 0010 sentinel marker: if the model ended with the per-ask sentinel, the
+  // response is AUTHORITATIVELY complete — strip the sentinel BEFORE hashing so
+  // stored content/hash/relay are clean. Sentinel presence is DEFINITIVE (the
+  // model was instructed to put it last, nothing after) — it does NOT need hash
+  // confirmation, unlike native markers that could theoretically appear
+  // mid-stream. Non-compliant model (no sentinel) → ADR 0011 reminder loop.
+  let sentinelConfirmed = false;
   if (p.sentinel) {
     const stripped = stripSentinel(poll.response, p.sentinel);
     if (stripped.found) {
@@ -929,6 +985,21 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
         response: stripped.text,
         markdown: mdStripped?.found ? mdStripped.text : poll.markdown,
         completionConfidence: 'authoritative',
+      };
+      sentinelConfirmed = true;
+    } else if (poll.state === 'completed' && !p.reminderSent) {
+      // ADR 0011 compliance loop: the model finished but skipped the status
+      // line (e.g. "Understood — I'll apply it going forward"). Inject ONE
+      // bounded reminder asking for ONLY the status line, keep the ask pending,
+      // re-check on the next poll. Never for non-completionMarker asks.
+      p.reminderSent = true;
+      recordSendEvent({ ...envelope, content: p.prompt }, 'send.queued');
+      await driver.ask(session, statusLineReminder(p.sentinel));
+      return {
+        completed: false, response: '', markdown: null, steps: p.stepsCollected,
+        currentStep: '', status: 'reminder_sent',
+        agentBrowsingUrl: '', timedOut: false,
+        correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
       };
     }
   }
@@ -947,8 +1018,10 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
     const confidence = poll.completionConfidence ?? 'weak';
     let complete: boolean;
     if (confidence === 'authoritative') {
-      // marker + same content as last poll (or cold start: no prior hash) ⇒ done
-      complete = p.prevHash === null || hash === p.prevHash;
+      // sentinel presence is DEFINITIVE (model wrote it last per instruction) —
+      // no hash confirmation needed. Native markers keep hash-confirmation to
+      // guard against a marker appearing mid-stream.
+      complete = sentinelConfirmed || p.prevHash === null || hash === p.prevHash;
     } else {
       const windowMs = windowForPoll(poll);
       const stability = completionStability(hash, p.prevHash, p.stableSince, Date.now(), windowMs);

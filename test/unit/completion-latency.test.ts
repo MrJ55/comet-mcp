@@ -177,13 +177,14 @@ test('amended: NOT a same-prefix superset → returns null (genuinely new turn, 
 // ---------------------------------------------------------------------------
 
 function sentinelDriver(answer: string, comply = true) {
-  const calls = { asked: [], polls: 0 };
+  const calls = { asked: [], polls: 0, reminders: 0 };
   // the driver echoes the sentinel from the WRAPPED prompt so the response ends
   // with the SAME sentinel dispatchAsk generated (compliance simulation);
   // comply=false → the model ignores the instruction (no sentinel)
   const echoedAnswer = (prompt: string) => {
-    const m = prompt.match(/exact string (\S+)/);
-    return comply && m ? answer + '\n\n' + m[1] : answer;
+    // capture the sentinel: "then the code <X>" in the status-line format
+    const m = prompt.match(/then the code (\S+)/) ?? prompt.match(/exact string (\S+)/);
+    return comply && m ? answer + '\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test Model, 2%, ' + m[1] : answer;
   };
   return {
     provider: 'gemini',
@@ -202,14 +203,46 @@ function sentinelDriver(answer: string, comply = true) {
   } as any;
 }
 
-test('ADR 0010: withSentinelInstruction wraps the prompt + generateSentinel is random', async () => {
+test('ADR 0010/0011: withSentinelInstruction wraps the prompt (all-turns status line) + generateSentinel is random', async () => {
   const { withSentinelInstruction, generateSentinel } = await import('../../dist/drivers/index.js');
   const s = generateSentinel();
   assert.equal(s.length, 10);
   const wrapped = withSentinelInstruction('What is X?', s);
   assert.ok(wrapped.includes(s));
-  assert.ok(wrapped.includes('end your response with the exact string'));
+  assert.ok(wrapped.includes('end EVERY reply in this session'), 'all-turns convention');
+  assert.ok(wrapped.includes('<context%>'), 'context% field specified');
+  assert.ok(wrapped.includes('MM/DD/YY'), 'date format enforced');
   assert.notEqual(generateSentinel(), generateSentinel(), 'per-ask random');
+});
+
+test('ADR 0011: parseStatusLine — full line parsed, partial line flagged incomplete', async () => {
+  const { parseStatusLine } = await import('../../dist/drivers/index.js');
+  const full = parseStatusLine('Answer.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Grok 4.5, 2%, Zz9Xq2Gm', 'Zz9Xq2Gm');
+  assert.equal(full.found, true);
+  assert.equal(full.complete, true);
+  assert.equal(full.turn, 'Turn 1');
+  assert.equal(full.date, '08/09/26');
+  assert.equal(full.model, 'Grok 4.5');
+  assert.equal(full.contextPct, '2%');
+  // missing fields → found but incomplete
+  const partial = parseStatusLine('Answer.\n\nTurn 1, 08/09/26, Zz9Xq2Gm', 'Zz9Xq2Gm');
+  assert.equal(partial.found, true);
+  assert.equal(partial.complete, false);
+  // no sentinel → not found
+  const none = parseStatusLine('Just an answer.', 'Zz9Xq2Gm');
+  assert.equal(none.found, false);
+});
+
+test('ADR 0011: stripSentinel removes the FULL status line (not just the token)', async () => {
+  const { stripSentinel } = await import('../../dist/drivers/index.js');
+  const r = stripSentinel('Answer text.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Grok 4.5, 2%, Zz9Xq2Gm', 'Zz9Xq2Gm');
+  assert.equal(r.found, true);
+  assert.equal(r.text, 'Answer text.');
+  assert.ok(!r.text.includes('Turn 1'), 'whole status line stripped');
+  // bare token still handled
+  const bare = stripSentinel('Answer.\n\nZz9Xq2Gm', 'Zz9Xq2Gm');
+  assert.equal(bare.found, true);
+  assert.equal(bare.text, 'Answer.');
 });
 
 test('ADR 0010: stripSentinel removes a terminal sentinel (own line) + trailing ws', async () => {
@@ -241,31 +274,73 @@ test('ADR 0010: completionMarker ask — sentinel present → finalizes on FIRST
   const d = sentinelDriver('A complete answer.');  // driver echoes the dispatch-generated sentinel
   const session = await d.open();
   const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
-  // the driver was asked the WRAPPED prompt (with the sentinel instruction)
-  assert.ok(d._calls.asked[0].includes('end your response with the exact string'), 'prompt wrapped');
+  // the driver was asked the WRAPPED prompt (with the status-line instruction)
+  assert.ok(d._calls.asked[0].includes('end EVERY reply in this session'), 'prompt wrapped with all-turns status line');
   const outcome = await advanceAsk(dispatched.idempotencyKey);
   assert.equal(outcome?.completed, true, 'sentinel ⇒ authoritative ⇒ completes on first completed poll (no 8s window)');
-  assert.equal(outcome?.response, 'A complete answer.', 'sentinel stripped from the surfaced response');
+  assert.equal(outcome?.response, 'A complete answer.', 'full status line stripped from the surfaced response');
   // the sentinel (from the wrapped prompt) must not leak into the response
   const wrappedPrompt = d._calls.asked[0] ?? '';
-  const sentinelInPrompt = wrappedPrompt.match(/exact string (\S+)/)?.[1] ?? '';
+  const sentinelInPrompt = wrappedPrompt.match(/then the code (\S+)/)?.[1] ?? '';
   assert.ok(sentinelInPrompt.length > 0, 'sentinel present in wrapped prompt');
   assert.ok(!outcome?.response.includes(sentinelInPrompt), 'no sentinel leak');
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
 });
 
-test('ADR 0010: non-compliant model (no sentinel) → falls back to normal stability path (not falsely finalized)', async () => {
+test('ADR 0011: non-compliant model (no sentinel) → reminder injected ONCE, ask stays pending', async () => {
   const { _resetForTests } = await import('../../dist/core/event-store.js');
   const { dispatchAsk, advanceAsk, isAskPending } = await import('../../dist/drivers/index.js');
   _resetForTests();
   const d = sentinelDriver('Plain answer without the marker', false);
   const session = await d.open();
   const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
-  // no sentinel ⇒ NOT authoritative ⇒ the stability window still applies — the
-  // first completed poll starts the clock but does NOT finalize early.
+  // completed but NO sentinel ⇒ ADR 0011 injects a bounded reminder, stays pending
   const first = await advanceAsk(dispatched.idempotencyKey);
-  assert.ok(first && !first.completed, 'no sentinel → not falsely completed (stability window holds)');
-  assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending (fallback path, not finalized)');
+  assert.ok(first && !first.completed, 'not completed yet (reminder path)');
+  assert.equal(first?.status, 'reminder_sent', 'reminder injected, awaiting the model reply');
+  assert.equal(d._calls.asked.length, 2, 'reminder sent as a follow-up ask in the thread');
+  assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending (compliance loop)');
+  // a SECOND non-compliant poll does NOT re-inject (bounded — one reminder)
+  const second = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(d._calls.asked.length, 2, 'reminder not re-sent (bounded once)');
+  assert.ok(second && !second.completed, 'falls to the normal stability path after the reminder');
+});
+
+test('ADR 0011: reminder loop — model complies after the reminder → finalizes authoritative with status line stripped', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advanceAsk, isAskPending } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  // driver ignores the first instruction, complies on the reminder (ask #2)
+  const d = {
+    provider: 'gemini',
+    open: async () => ({ provider: 'gemini', tabId: 't', targetId: 't', cdpSessionId: 'ws://x', openedAt: '', state: 'connected' }),
+    ask: async (_s: any, prompt: string) => { (d as any)._calls.asked.push(prompt); return { receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'sent' as const, recordedAt: '' } }; },
+    poll: async () => {
+      const calls = (d as any)._calls;
+      calls.polls++;
+      if (calls.polls === 1) return { state: 'idle', steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+      if (calls.asked.length < 2) {
+        // first ask: compliant-looking answer WITHOUT the status line
+        return { state: 'completed', steps: [], currentStep: '', response: 'First answer, no status line.', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+      }
+      // after the reminder (ask #2): now WITH the status line + sentinel
+      const m = calls.asked[1].match(/then the code (\S+)/) ?? calls.asked[1].match(/exact string (\S+)/);
+      const sentinel = m?.[1] ?? 'NOPE';
+      return { state: 'completed', steps: [], currentStep: '', response: 'First answer, no status line.\n\nTurn 1, 08/09/26, 10:53 PM CEST, Test, 2%, ' + sentinel, markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+    },
+    stop: async () => true,
+    reset: async () => {},
+    health: async () => ({ provider: 'gemini', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),
+    _calls: { asked: [] as string[], polls: 0 },
+  } as any;
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  const first = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(first?.status, 'reminder_sent', 'reminder injected');
+  const second = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(second?.completed, true, 'compliance after reminder ⇒ finalizes');
+  assert.equal(second?.response, 'First answer, no status line.', 'status line stripped, original answer preserved');
+  assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized after reminder loop');
 });
 
 // ---------------------------------------------------------------------------

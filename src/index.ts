@@ -194,7 +194,7 @@ const TOOLS: Tool[] = [
         timeout: { type: "number", description: "Max wait time in ms (default: 15000)" },
         tabId: { type: "string", description: "Specific tabId to ask in (optional â€” defaults to the provider's registered tab)" },
         idempotencyKey: { type: "string", description: "Replay-safe key: re-sending with the same key returns the prior outcome, never a duplicate send (optional)" },
-        completionMarker: { type: "boolean", description: "ADR 0010: ask the model to end with a random sentinel → authoritative completion when present (default: false)" },
+        completionMarker: { type: "boolean", description: "ADR 0010/0011: ask the model to end EVERY reply in the session with a status line (turn, MM/DD/YY, time, model, context%, sentinel) → authoritative completion when the sentinel is present; a bounded reminder is injected if a reply skips it (default: false)" },
       },
       required: ["provider", "prompt"],
     },
