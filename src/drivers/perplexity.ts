@@ -315,8 +315,12 @@ export class PerplexityDriver implements ChatDriver {
     // UI drift, and gating extraction on them hid the rendered reply (live bug
     // 2026-08-10: ask stuck WATCHING forever with the answer on screen).
     const joinedProse = (value.proseTexts ?? []).join('\n\n').trimEnd();
-    // status line anywhere in body, followed only by UI residue to EOF
-    const STATUS_LINE_RE = /Turn \d+,\s*\d{2}\/\d{2}\/\d{2},[^\n]*\d+%(?:,\s*\S+)?(?=[\s\S]*?(?:Ask a follow-up|Sources|Search|$))/;
+    // status line = a full line starting with "Turn N," (may carry
+    // ", then the code <sentinel>" after the %); captures the ENTIRE line so
+    // the sentinel survives for the gate's stripSentinel. Lookahead to UI
+    // chrome (Sources / Ask a follow-up / EOF) guards against mid-thread
+    // matches on older turns.
+    const STATUS_LINE_RE = /Turn \d+,\s*\d{2}\/\d{2}\/\d{2},[^\n]+(?=[\s\S]*?(?:Ask a follow-up|Sources|Search|$))/;
     const statusLineMatch = bodyText.match(STATUS_LINE_RE);
     const hasStatusLine = !!statusLineMatch || /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},.*\d+%(?:\s*,\s*\S+)?$/m.test(joinedProse);
     const status = hasStatusLine
