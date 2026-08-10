@@ -63,3 +63,31 @@ injects a bounded follow-up asking for it, then re-polls.
   as observability, never used for token accounting or as truth.
 - The `reminder_sent` status renders honestly; the advancer (ADR 0010-adjacent)
   can drive the compliance loop between client polls.
+
+## Amendments (2026-08-10, live council-test bugs)
+
+5. **Native-marker authoritative requires a prior poll** (`852f96e`): grok renders
+   the timing line (`Worked for Xs`) at the START of the message while the answer
+   streams below — a marker on the FIRST poll must NOT complete/remind
+   mid-stream. Authoritative now needs `prevHash !== null` (prior poll) AND hash
+   equality; only `sentinelConfirmed` bypasses cold-start. Fixes the reminder
+   interrupting grok mid-answer.
+6. **Tab reset invalidates the session sentinel** (`108b405`): the status-line
+   instruction is a THREAD convention. `tabRegistry.reset()` now fires an
+   `onReset` observer; the driver clears the tab's sentinel so the next
+   completionMarker ask re-injects the instruction with a FRESH sentinel.
+   Without this, the first ask in a reset tab was sent RAW (no status-line
+   section) and the reminder fired on the tokenless completion (perplexity live
+   bug).
+7. **Status-line SHAPE without the token is compliant** (`9033c5a`): a trailing
+   `Turn <N>, <MM/DD/YY>, <time> <tz>, <model>, <context%>` line (no sentinel)
+   means the model followed the convention and just dropped the control
+   artifact — NO reminder fires; the reply completes through the stability/hash
+   path. `parseStatusLineShape` detects the shape.
+8. **Prompt-landed guard before submit** (`9033c5a`): `composer-emptied` as the
+   only verification false-positives when the composer was ALREADY empty (fresh
+   tab — typeInto hit a not-ready element). `BaseChatDriver.ask` now verifies
+   the prompt text is actually in the composer (`promptLandedIn`) before
+   submitting; otherwise the ask is `blocked` (never `sent`), so the reminder
+   loop cannot inject technical prompts into a thread that never got the real
+   question.

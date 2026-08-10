@@ -35,6 +35,16 @@ hash), `src/core/relay-policy.ts` (R3 enforcement + markdown trust boundary),
   finalizes hash-confirmed & timer-free; heuristic (stop-absent w/ stop control,
   Perplexity steps-only) 3s window; weak (response-present, no marker) 8s window.
   Missing confidence ⇒ weak (fail-closed). `completionStability(windowMs)` is pure.
+  Amendments (2026-08-10): (a) authoritative native markers ALSO require a prior
+  poll (`prevHash !== null`) — grok's `Worked for Xs` renders at message START
+  while the answer streams, so a cold-start marker must not complete/remind
+  mid-stream; only the sentinel bypasses cold-start. (b) A trailing status-line
+  SHAPE without the token (Turn N/date/time/model/%) is compliant-enough — NO
+  reminder fires, the reply completes via the stability path (`parseStatusLineShape`).
+  (c) A tab reset (`tabRegistry.onReset`) clears the session sentinel — the next
+  completionMarker ask re-injects the instruction with a fresh token. (d) `ask`
+  verifies the prompt text LANDED in the composer (`promptLandedIn`) before
+  submitting — composer-emptied alone false-positives on fresh tabs.
 
 **Prompt normalization**: strips bullet points, collapses newlines to spaces.
 
@@ -59,7 +69,7 @@ default `redacted` (metadata-only, no content leak).
 ## Build & Test
 ```bash
 npm run build          # tsc
-node --test test/unit/*.test.ts   # full unit suite (199/199 as of P4)
+node --test test/unit/*.test.ts   # full unit suite (236/236 as of 2026-08-10)
 ```
 Manual testing only (integration code, external DOM dependency). After rebuilds,
 **kill the stale bridge process** (gotcha #7): the pi gateway caches the comet-bridge
@@ -82,3 +92,5 @@ CommandLine match 'comet-mcp' and Name eq 'node.exe'` → Stop-Process.
 - **Research mode**: Takes longer than search mode, may need multiple polls.
 - **TIMED_OUT is normal** (soft expiry): poll again — the bridge is still watching the tab; a late answer recovers as `completed_late`.
 - **NEVER pollute real provider threads with test prompts** — test prompts (PING/PONG/etc.) go in a dedicated deletable tab (user rule 2026-08-07).
+- **After a tab reset, the FIRST ask must carry the status-line instruction** (2026-08-10): a reset kills the thread; the session sentinel is cleared via `tabRegistry.onReset`, so the next `completionMarker` ask re-injects it. If you see a reminder fire right after opening/resetting a tab, the prompt never landed — check the ask was `sent` (not `blocked`) and the thread actually shows the question.
+- **Reminder firing with no normal prompt in the thread = the ask never rendered** (2026-08-10 user report): `promptLandedIn` blocks the submit when the text isn't in the composer; `blocked` receipt means the fresh-tab guard fired — do NOT re-dispatch blindly, fix the tab state first.
