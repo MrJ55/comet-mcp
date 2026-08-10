@@ -100,10 +100,30 @@ the rebuilt dist. If the WATCHING bug still reproduces after a clean bridge rest
 the fix belongs in the **pi gateway's process management** (force a fresh spawn / clear
 the comet-bridge process cache after rebuild), not in the driver.
 
+## Amendment — the fallback-gate bug (user report, same session)
+
+A SECOND, deeper bug was identified: even when the sentinel/state detection fails,
+the **fallbacks never ran** because the entire completion gate (stability window,
+hash-confirm, bounded reminder) was nested inside `if (poll.state === 'completed')`.
+A state-detection failure (driver returns `idle` while the answer is rendered) made
+ALL fallbacks unreachable → the ask hung forever regardless of content.
+
+Fixed in `a770119`: the gate is now content-driven — `if (p.sawNewResponse)` only.
+Completion is decided by CONTENT: status-line shape / sentinel present ⇒ complete
+immediately (the status line IS the contract); otherwise the stability window and
+bounded reminder still fire. The `poll.state` label no longer gates anything.
+
+**DEBUG SWITCH:** `COMET_STRICT_COMPLETION_GATE=1` restores the original strict
+`poll.state === 'completed'` gate so the underlying state-detection bug can be
+reproduced in isolation (the fallback would otherwise mask it). Read once at module
+load; the test spawns a child process with the env set to verify.
+
 ## Reproduction
 
 ```bash
 npm run build
-node --test test/unit/*.test.ts              # 238/238
+node --test test/unit/*.test.ts              # 240/240
 node test/integration/probe-perplexity-status.mjs   # probes the live tab directly
+# to reproduce the ORIGINAL state-detection hang in isolation:
+COMET_STRICT_COMPLETION_GATE=1 node dist/index.js
 ```
