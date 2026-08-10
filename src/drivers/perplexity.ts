@@ -14,6 +14,7 @@
 
 import { tabRegistry } from '../tab-registry.js';
 import { sessionPool } from '../cdp-pool.js';
+import { createRequire } from 'module';
 import type { TabCDPHandle } from '../cdp-pool.js';
 import type { EvaluateResult } from '../types.js';
 import type {
@@ -169,6 +170,35 @@ const POLL_SCRIPT = `(() => {
   return JSON.stringify({ hasActiveStopButton, hasLoadingSpinner, bodyText: body, proseTexts, proseHtmls });
 })()`;
 
+// 2026-08-10 (phantom-module fix): the module-level POLL_SCRIPT constant can be
+// served stale by the ESM loader even after rebuilds (observed: loaded module
+// evaluated a 2945-char object-return script while dist on disk is 3012 with
+// JSON.stringify — a mix of builds in the loaded module graph). Read the script
+// from DISK at poll time so the driver ALWAYS uses the current dist. Falls back
+// to the module constant if the file read fails (e.g. packaged installs).
+let cachedPollScript: string | null = null;
+const nodeRequire = createRequire(import.meta.url);
+function currentPollScript(): string {
+  if (cachedPollScript) return cachedPollScript;
+  try {
+    const fs = nodeRequire('fs') as typeof import('fs');
+    const path = nodeRequire('path') as typeof import('path');
+    const here = path.dirname(nodeRequire.resolve('./perplexity.js'));
+    const file = path.join(here, 'perplexity.js');
+    const src = fs.readFileSync(file, 'utf8');
+    const i = src.indexOf('const POLL_SCRIPT = ');
+    if (i >= 0) {
+      const a = src.indexOf('`', i) + 1;
+      const b = src.indexOf('`;', a);
+      if (b > a) {
+        const script = src.slice(a, b);
+        if (script.includes('JSON.stringify')) cachedPollScript = script;
+      }
+    }
+  } catch { /* fall through to the module constant */ }
+  return cachedPollScript ?? POLL_SCRIPT;
+}
+
 export class PerplexityDriver implements ChatDriver {
   readonly provider = 'perplexity' as const;
 
@@ -199,6 +229,12 @@ export class PerplexityDriver implements ChatDriver {
         editable.focus();
         document.execCommand('selectAll', false, null);
         document.execCommand('insertText', false, ${JSON.stringify(prompt)});
+        // 2026-08-10 (submission bug, user report): execCommand('insertText')
+        // sets the DOM but does NOT fire React's onChange — Perplexity never
+        // enables the Submit button / registers the text, so Enter+click both
+        // no-op and the submit fallthrough lied (send.accepted, no response).
+        // Dispatch a real InputEvent so React sees the value and enables submit.
+        editable.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(prompt)} }));
         return { success: true };
       }
       if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
@@ -270,14 +306,30 @@ export class PerplexityDriver implements ChatDriver {
         b.click(); return true;
       })()`);
       if (clicked === true) {
-        await new Promise((r) => setTimeout(r, 500));
-        return true;
+        await new Promise((r) => setTimeout(r, 700));
+        // verify the composer actually emptied (the click really submitted)
+        const emptied = await evalValue(handle, `(() => {
+          const el = document.querySelector(${JSON.stringify(composer)});
+          if (!el) return false;
+          const v = el.isContentEditable || el.tagName === 'DIV' ? el.innerText : (el.value || '');
+          return v.trim().length < 5;
+        })()`);
+        return emptied === true;
       }
     }
 
-    // Last resort: Enter one more time
+    // Last resort: Enter one more time — but verify it actually submitted
+    // (2026-08-10 bug: this returned true unconditionally, recording send.accepted
+    // while nothing was submitted — the prompt never rendered, no response).
     await handle.pressKey('Enter');
-    return true;
+    await new Promise((r) => setTimeout(r, 700));
+    const emptied = await evalValue(handle, `(() => {
+      const el = document.querySelector(${JSON.stringify(composer)});
+      if (!el) return false;
+      const v = el.isContentEditable || el.tagName === 'DIV' ? el.innerText : (el.value || '');
+      return v.trim().length < 5;
+    })()`);
+    return emptied === true;
   }
 
   async poll(session: TabSession): Promise<PollResult> {
@@ -298,7 +350,7 @@ export class PerplexityDriver implements ChatDriver {
       }
     } catch { /* continue without URL */ }
 
-    const raw = await handle.safeEvaluate(POLL_SCRIPT);
+    const raw = await handle.safeEvaluate(currentPollScript());
     // 2026-08-10: POLL_SCRIPT returns a JSON STRING (object serialization broke
     // on U+2028/2029 in innerHTML — Runtime.evaluate returned objectId, no
     // value). Parse it here; fall back to the raw object shape defensively.
