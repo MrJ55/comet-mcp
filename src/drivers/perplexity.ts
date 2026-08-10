@@ -125,19 +125,17 @@ const POLL_SCRIPT = `(() => {
   }
   const hasLoadingSpinner = document.querySelector('[class*="animate-spin"], [class*="animate-pulse"]') !== null;
 
-  // collect RAW prose texts (filtering happens Node-side). 2026-08-10 FIX:
-  // scope to the LAST prose container ONLY (the current turn — the entry's own
-  // responseContainer contract says \"take the LAST element for the current\n  // turn\"). Previously ALL prose in <main> was collected and joined — typing a
-  // new user prompt grows that join, so sawNewResponse fired on the user's own
-  // prompt before the model answered, and the gate finalized with the previous
-  // turn's content (perplexity live bug 2026-08-10: prompt-3 ask completed in
-  // 3s with the P7 hash cdc52a21). The last container's innerText holds the
-  // full current turn (fragments included); a typed prompt does not touch it.
+  // collect RAW prose texts (filtering happens Node-side)
   const mainContent = document.querySelector('main') || document.body;
-  const allProse = Array.from(mainContent.querySelectorAll('[class*="prose"]'));
-  const lastProse = allProse[allProse.length - 1] ?? null;
-  const proseTexts = lastProse ? [lastProse.innerText.trim()] : [];
-  const proseHtmls = lastProse ? [lastProse.innerHTML] : [];
+  const proseTexts = [];
+  const proseHtmls = [];
+  for (const el of mainContent.querySelectorAll('[class*="prose"]')) {
+    if (el.closest('nav, aside, header, footer, form')) continue;
+    const t = el.innerText.trim();
+    if (t.length > 0) proseTexts.push(t);
+    // P2 markdown: capture the LAST prose element's innerHTML for conversion
+    proseHtmls.push(el.innerHTML);
+  }
 
   return { hasActiveStopButton, hasLoadingSpinner, bodyText: body, proseTexts, proseHtmls };
 })()`;

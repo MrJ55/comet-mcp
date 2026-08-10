@@ -960,6 +960,14 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   if (!p) return null;
   const { driver, session, envelope } = p;
   const targetId = session.targetId;
+  // 2026-08-10 (perplexity live bug): the tab's ALREADY-DELIVERED content hash
+  // (the previous turn's response, or the durable cursor on reconnect). A
+  // follow-up ask's first polls can read the thread BEFORE the new answer
+  // exists — the extraction returns the previous turn's content, whose hash
+  // matches this. That content is NOT a new response for THIS ask; finalizing
+  // with it delivers the old turn twice (observed: prompt-3 ask recorded
+  // contentHash cdc52a21 = the P7 review, 3s after dispatch).
+  const deliveredHash = session.lastContentHash ?? null;
 
   // One-shot soft-expiry transition (Claude/Grok: fire timed_out EXACTLY once —
   // the elapsed >= timeoutMs check would otherwise re-fire on every later poll).
@@ -1065,7 +1073,15 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   // durable contentHash always matches the stored text
   const hash = simpleHash(poll.response);
   if (poll.response.length > 0 && (hash !== p.beforeHash || poll.response.length > p.beforeLen)) {
-    p.sawNewResponse = true;
+    // 2026-08-10 (perplexity live bug): a response whose hash equals the tab's
+    // ALREADY-DELIVERED content is the PREVIOUS turn being re-read (the new
+    // answer hasn't rendered yet) — never a new response for this ask. This
+    // closes the stale-latch where a follow-up ask finalized with the prior
+    // turn's content (prompt-3 ask recorded the P7 hash cdc52a21). The ask
+    // stays pending until the genuinely new answer appears (or the reaper).
+    if (deliveredHash === null || hash !== deliveredHash) {
+      p.sawNewResponse = true;
+    }
   }
 
   if (poll.state === 'completed' && p.sawNewResponse) {

@@ -691,3 +691,50 @@ test('2026-08-10 perplexity LIVE bug (reminder at 14:07:18 raced the line render
   assert.ok(p3?.response.includes('Turn 3, 08/10/26, 10:28 AM EDT, Perplexity, 6%'), 'status line preserved');
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
 });
+
+test('2026-08-10 stale-latch regression: a follow-up ask whose first poll reads the PREVIOUS turn\'s delivered content must NOT finalize with it — the ask waits for genuinely NEW content', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advanceAsk, isAskPending, _resetPendingForTests } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  _resetPendingForTests();
+  // Simulate a tab whose last delivered content is the P7 review (hash X): the
+  // follow-up ask's poll returns the SAME content until the new answer renders.
+  let pollN = 0;
+  const d = {
+    provider: 'perplexity',
+    open: async () => ({ provider: 'perplexity', tabId: 't', targetId: 't', cdpSessionId: 'ws://x', openedAt: '', state: 'connected' }),
+    ask: async () => { d._calls.asked.push('Q'); return { receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'sent' as const, recordedAt: '' } }; },
+    poll: async () => {
+      d._calls.polls++;
+      // poll #1 = before-snapshot: the PREVIOUS turn's content (P7 review)
+      if (d._calls.polls === 1) return { state: 'completed', steps: [], currentStep: '', response: 'P7 review content.\n\nTurn 2, 08/10/26, 10:27 AM EDT, Perplexity, 12%, AbCdEfGhIj', markdown: null, hasStopButton: false, agentBrowsingUrl: '', contentHash: 'stale-p7' };
+      // poll #2: the ask was typed; poll STILL reads the P7 content (no new answer yet)
+      if (d._calls.polls === 2) return { state: 'completed', completionConfidence: 'authoritative' as const, steps: [], currentStep: '', response: 'P7 review content.\n\nTurn 2, 08/10/26, 10:27 AM EDT, Perplexity, 12%, AbCdEfGhIj', markdown: null, hasStopButton: false, agentBrowsingUrl: '', contentHash: 'stale-p7' };
+      // poll #3+: the NEW consolidated answer has rendered
+      return { state: 'completed', completionConfidence: 'authoritative' as const, steps: [], currentStep: '', response: 'Consolidated position to Grok.\n\nTurn 3, 08/10/26, 10:41 AM EDT, Perplexity, 15%, ZzYyXxWwVv', markdown: null, hasStopButton: false, agentBrowsingUrl: '', contentHash: 'new-answer' };
+    },
+    stop: async () => true, reset: async () => {},
+    health: async () => ({ provider: 'perplexity', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),
+    _calls: { asked: [] as string[], polls: 0 },
+  } as any;
+  const session = await d.open();
+  // Pre-seed the tab's delivered hash (what the P7 review already delivered)
+  session.lastContentHash = 'stale-p7';
+  const dispatched = await dispatchAsk(d, session, 'Follow-up?', { timeoutMs: 60000, completionMarker: true });
+  // poll #1: reads the PREVIOUS turn's content (stale-p7) — the ask just typed,
+  // no new answer yet. MUST NOT finalize with the stale P7 content.
+  const p1 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p1?.completed, false, 'stale previous-turn content is NOT a new response');
+  assert.notEqual(p1?.response, 'P7 review content.\n\nTurn 2, 08/10/26, 10:27 AM EDT, Perplexity, 12%, AbCdEfGhIj', 'must not deliver the previous turn\'s content');
+  assert.ok(isAskPending(dispatched.idempotencyKey), 'ask stays pending');
+  // poll #2: STILL the stale P7 content (new answer not rendered) — still pending
+  const p2 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p2?.completed, false, 'still stale — still not complete');
+  assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending');
+  // poll #3: the NEW consolidated answer rendered (hash differs) → completes
+  const p3 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p3?.completed, true, 'genuinely new content → completes');
+  assert.ok(p3?.response.includes('Consolidated position to Grok.'), 'delivers the NEW answer, not the stale P7');
+  assert.equal(d._calls.asked.length, 1, 'no reminder fired — the new answer carried its status line');
+  assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
+});
