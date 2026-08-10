@@ -282,9 +282,11 @@ test('ADR 0010/0011 (2026-08-10 user report): status-line instruction injected O
   assert.ok(d._calls.asked[0].includes('end EVERY reply in this session'), 'instruction on the FIRST ask');
   const firstSentinel = d._calls.asked[0].match(/then the code (\S+)/)?.[1] ?? '';
   assert.ok(firstSentinel.length > 0, 'sentinel established on first ask');
-  // second ask in the SAME tab: NO re-broadcast, prompt is the raw question
+  // second ask in the SAME tab: NO re-broadcast of the instruction, but the
+  // dispatch TIMESTAMP (2026-08-10 user request) still goes into every prompt.
   await dispatchAsk(d, session, 'Q2?', { timeoutMs: 60000, completionMarker: true });
-  assert.equal(d._calls.asked[1], 'Q2?', 'second ask is the RAW prompt — instruction NOT re-submitted');
+  assert.ok(d._calls.asked[1].startsWith('Q2?'), 'second ask is the RAW question — instruction NOT re-submitted');
+  assert.ok(d._calls.asked[1].includes('[prompt sent at '), 'dispatch timestamp stamped on EVERY prompt');
   assert.ok(!d._calls.asked[1].includes('end EVERY reply'), 'no re-broadcast of the status-line instruction');
 });
 

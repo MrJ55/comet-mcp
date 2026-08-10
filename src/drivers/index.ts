@@ -276,6 +276,13 @@ export interface AskOutcome {
   deduped?: boolean;
   /** P6/2026-08-08: true when the outcome was recovered after the ask budget expired (soft expiry → watching). */
   late?: boolean;
+  /**
+   * 2026-08-10 (user request): dispatch timestamp stamped into the wire prompt
+   * (ISO string in the thread) — generation + completion-detection latency is
+   * measurable: prompt-sent time (this) vs the model's status-line time vs
+   * response.received wall-clock in the event log.
+   */
+  sentAt?: string;
 }
 
 /** Normalize prompt — convert markdown/bullets to natural text (preserves comet_ask behavior). */
@@ -498,6 +505,10 @@ export function compactAskResult(provider: string, outcome: AskOutcome): string 
   if (outcome.idempotencyKey) extra.idempotencyKey = outcome.idempotencyKey;
   if (outcome.replayed) extra.replayed = true;
   if (outcome.deduped) extra.deduped = true;
+  // 2026-08-10 (user request): expose dispatch time for latency measurement —
+  // generation = status-line time − sentAt; detection = now − sentAt.
+  if (outcome.sentAt) extra.sentAt = outcome.sentAt;
+  if (outcome.late) extra.late = true;
   return structuredCompact(rec, outcome.response, outcome.completed ? 'completed' : outcome.status, extra);
 }
 
@@ -562,8 +573,13 @@ export async function askAndWait(driver: ChatDriver, prompt: string, timeoutMs: 
  * The caller (MCP handler) resolves the tabId; this keeps the session open across
  * ask+poll with no reconnect, and applies per-tab backoff + circuit breaking.
  */
-export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prompt: string, timeoutMs: number, opts: { idempotencyKey?: string } = {}): Promise<AskOutcome> {
+export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prompt: string, timeoutMs: number, opts: { idempotencyKey?: string; sentAt?: string } = {}): Promise<AskOutcome> {
   const targetId = session.targetId;
+  const sentAt = opts.sentAt ?? new Date().toISOString();
+  // 2026-08-10 (user request): dispatch timestamp stamped into the wire prompt
+  // for latency measurement — visible in the thread + carried on the outcome.
+  const stampedPrompt = `${prompt}\n\n[prompt sent at ${sentAt}]`;
+  prompt = stampedPrompt;
 
   // P1 Half 2 — replay guard FIRST: a recorded idempotencyKey means this logical send
   // already happened; return its prior outcome, never re-send (P1 gate replay-safety).
@@ -671,6 +687,7 @@ export async function askAndWaitOn(driver: ChatDriver, session: TabSession, prom
         status: last.state,
         agentBrowsingUrl: last.agentBrowsingUrl,
         timedOut: false,
+        sentAt: opts.sentAt,
         correlationId: envelope.correlationId,
         idempotencyKey: envelope.idempotencyKey,
       };
@@ -832,6 +849,11 @@ interface PendingAsk {
    * compliance/reminder loop (a phantom send must not trigger a reminder).
    */
   sendVerified: boolean;
+  /**
+   * 2026-08-10 (user request): ISO dispatch timestamp stamped into the wire
+   * prompt — latency measurement (sent vs status-line vs response.received).
+   */
+  sentAt?: string;
 }
 
 /**
@@ -916,7 +938,12 @@ export async function dispatchAsk(
   const isFirstInTab = opts.completionMarker && existingSentinel === undefined;
   const sentinel = opts.completionMarker ? (existingSentinel ?? generateSentinel()) : undefined;
   if (isFirstInTab && sentinel) sessionSentinels.set(session.targetId, sentinel);
-  const wirePrompt = isFirstInTab ? withSentinelInstruction(prompt, sentinel!) : prompt;
+  // 2026-08-10 (user request): stamp the DISPATCH time into the wire prompt so
+  // generation + completion-detection latency are measurable end-to-end —
+  // prompt-sent time (here) vs status-line time (model's own clock) vs
+  // response.received (detection). Visible in the thread and the event store.
+  const sentAt = new Date().toISOString();
+  const wirePrompt = `${(isFirstInTab ? withSentinelInstruction(prompt, sentinel!) : prompt)}\n\n[prompt sent at ${sentAt}]`;
 
   // durable lifecycle: envelope.created → send.queued → snapshot → ask → accepted
   recordEnvelopeCreated({ ...envelope, content: wirePrompt });
@@ -933,6 +960,7 @@ export async function dispatchAsk(
     driver, session, prompt: wirePrompt, envelope,
     beforeHash, beforeLen,
     startTime: Date.now(),
+    sentAt,
     // 2026-08-08: default ask budget is a CLIENT-VISIBLE UX knob (when the client
     // first sees a deadline) — correctness lives in the non-destructive expiry
     // (advanceAsk soft-transition), not in this number.
@@ -1158,6 +1186,7 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
         agentBrowsingUrl: poll.agentBrowsingUrl,
         timedOut: false,
         late: wasLate,
+        sentAt: p.sentAt,
         correlationId: envelope.correlationId,
         idempotencyKey: envelope.idempotencyKey,
       };
