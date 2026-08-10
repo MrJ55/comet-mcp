@@ -139,7 +139,10 @@ const POLL_SCRIPT = `(() => {
   // the whole collected set (first turn).
   const mainContent = document.querySelector('main') || document.body;
   const allProse = Array.from(mainContent.querySelectorAll('[class*="prose"]'));
-  const isStatusLine = (el: Element) => /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},/.test((el.textContent || '').trim());
+  // NOTE: no TS type annotations inside injected scripts — they survive verbatim
+  // into the browser and throw SyntaxError (2026-08-10: 'el: Element' broke
+  // every poll → send.blocked).
+  const isStatusLine = (el) => /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},/.test((el.textContent || '').trim());
   let currentStart = 0;
   let seenStatus = 0;
   for (let i = 0; i < allProse.length; i++) {
