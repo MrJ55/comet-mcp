@@ -437,3 +437,25 @@ test('advancer: sweep is bounded per tick (thundering-herd guard)', async () => 
   // the rest remain pending for later sweeps
   assert.ok(listPendingAsks().length >= 2, 'leftover asks pending for later sweeps');
 });
+
+test('ADR 0011 guard (2026-08-10 grok live bug): UNVERIFIED send must NOT trigger the reminder loop', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advanceAsk, isAskPending } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  // driver whose ask returns status 'unknown' (submit NOT verified — composer
+  // still had text, like grok on a fresh tab). The prompt never rendered.
+  const d = {
+    provider: 'grok',
+    open: async () => ({ provider: 'grok', tabId: 't', targetId: 't', cdpSessionId: 'ws://x', openedAt: '', state: 'connected' }),
+    ask: async () => ({ receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'unknown' as const, recordedAt: '', details: 'submit not verified' } }),
+    poll: async () => ({ state: 'completed', steps: [], currentStep: '', response: 'A stale reply with no status line.', markdown: null, hasStopButton: false, agentBrowsingUrl: '' }),
+    stop: async () => true, reset: async () => {}, health: async () => ({ provider: 'grok', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),
+    _calls: { asked: [] as string[], polls: 0 },
+  } as any;
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  // even though the poll looks 'completed' without a sentinel, the send was NOT
+  // verified — the reminder must NOT fire (a phantom send has no reply to fix)
+  const outcome = await advanceAsk(dispatched.idempotencyKey);
+  assert.notEqual(outcome?.status, 'reminder_sent', 'phantom send must NOT enter the compliance loop');
+});

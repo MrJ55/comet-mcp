@@ -166,13 +166,36 @@ export class GrokDriver implements ChatDriver {
       submitted = true;
     }
 
+    // 2026-08-10 (live council test): VERIFY the prompt actually left the composer.
+    // grok.com may render the send button for a moment after typing but the click
+    // can land before the chat-input is ready (fresh tab), or Enter on the wrong
+    // focus silently no-ops. Claiming 'sent' without proof made dispatchAsk record
+    // send.accepted for a prompt that never appeared — then the advancer's reminder
+    // loop compounded it. Proof = composer emptied within a short window.
+    await new Promise((r) => setTimeout(r, 800));
+    const emptied = await evalValue(handle, `(() => {
+      const el = document.querySelector(${JSON.stringify(composer)});
+      if (!el) return false;
+      const editable = el.matches('[contenteditable]') ? el : (el.querySelector('[contenteditable]') || el);
+      return (editable.innerText || '').trim().length === 0;
+    })()`);
+    if (emptied !== true) {
+      return {
+        receipt: {
+          receiptId: crypto.randomUUID(), envelopeId: 'local', correlationId: crypto.randomUUID(),
+          idempotencyKey: crypto.randomUUID(), status: 'unknown', recordedAt: new Date().toISOString(),
+          details: 'Grok submit not verified — composer still has text after send attempt; prompt may not have rendered',
+        },
+      };
+    }
+
     return {
       receipt: {
         receiptId: crypto.randomUUID(), envelopeId: 'local', correlationId: crypto.randomUUID(),
         idempotencyKey: crypto.randomUUID(),
-        status: submitted ? 'sent' : 'unknown',
+        status: 'sent',
         recordedAt: new Date().toISOString(),
-        details: submitted ? `Prompt sent: "${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}"` : 'Submission uncertain',
+        details: 'Prompt sent + verified (composer emptied)',
       },
     };
   }

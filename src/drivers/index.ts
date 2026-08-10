@@ -801,6 +801,12 @@ interface PendingAsk {
    * non-compliant reply. Bounded — one reminder per ask, then fall back.
    */
   reminderSent?: boolean;
+  /**
+   * 2026-08-10 (live council test): whether the driver VERIFIED the prompt
+   * actually submitted (e.g. grok composer emptied). False ⇒ never enter the
+   * compliance/reminder loop (a phantom send must not trigger a reminder).
+   */
+  sendVerified: boolean;
 }
 
 /**
@@ -858,7 +864,8 @@ export async function dispatchAsk(
   const beforeHash = before.contentHash ?? simpleHash(before.response);
   const beforeLen = before.response.length;
   const askReceipt = await driver.ask(session, wirePrompt);
-  recordSendEvent({ ...envelope, content: wirePrompt }, askReceipt.receipt.status === 'sent' ? 'send.accepted' : 'send.unknown');
+  const sendVerified = askReceipt.receipt.status === 'sent';
+  recordSendEvent({ ...envelope, content: wirePrompt }, sendVerified ? 'send.accepted' : 'send.unknown');
 
   pendingAsks.set(askKey(envelope), {
     driver, session, prompt: wirePrompt, envelope,
@@ -872,6 +879,7 @@ export async function dispatchAsk(
     stepsCollected: [], sawNewResponse: false,
     last: null, prevHash: null, stableSince: null,
     sentinel,
+    sendVerified,
   });
   lastDispatched.set(driver.provider, askKey(envelope));
   return { correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey, status: 'in_progress' };
@@ -989,11 +997,13 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
         completionConfidence: 'authoritative',
       };
       sentinelConfirmed = true;
-    } else if (poll.state === 'completed' && !p.reminderSent) {
+    } else if (poll.state === 'completed' && !p.reminderSent && p.sendVerified) {
       // ADR 0011 compliance loop: the model finished but skipped the status
       // line (e.g. "Understood — I'll apply it going forward"). Inject ONE
       // bounded reminder asking for ONLY the status line, keep the ask pending,
-      // re-check on the next poll. Never for non-completionMarker asks.
+      // re-check on the next poll. Never for non-completionMarker asks, and
+      // NEVER when the send was not verified (a phantom send must not trigger
+      // the compliance loop — 2026-08-10 grok live bug).
       p.reminderSent = true;
       recordSendEvent({ ...envelope, content: p.prompt }, 'send.queued');
       await driver.ask(session, statusLineReminder(p.sentinel));

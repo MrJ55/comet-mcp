@@ -15,11 +15,11 @@
         "min-h-[60px]"
       ],
       "snippet": "\n",
-      "confidence": 0.9500000000000001,
+      "confidence": 0.8,
       "success_count": 1,
-      "fail_count": 0,
+      "fail_count": 1,
       "fingerprint": 3028313357,
-      "last_validated": 1786108682
+      "last_validated": 1786362784
     },
     "sendButton": {
       "selector": "[data-testid=\"chat-submit\"][aria-label=\"Submit\"]",
