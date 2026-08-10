@@ -38,6 +38,15 @@ const DRIVERS: Record<string, ChatDriver> = {
   claude: claudeDriver,
 };
 
+/**
+ * 2026-08-10 (user request): DEBUG switch — when set, the completion gate
+ * requires poll.state === 'completed' (the ORIGINAL behavior). This lets the
+ * underlying state-detection bug be reproduced/diagnosed in isolation instead
+ * of being masked by the content-based fallback. Read ONCE at module load — a
+ * per-call process.env read is racy under node's concurrent test runner.
+ */
+export const STRICT_COMPLETION_GATE = process.env.COMET_STRICT_COMPLETION_GATE === '1';
+
 /** Resolve a driver by provider name, or null for unknown. */
 export function getDriver(provider: string): ChatDriver | null {
   return DRIVERS[provider] ?? null;
@@ -1104,11 +1113,22 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
     p.sawNewResponse = true;
   }
 
-  if (poll.state === 'completed' && p.sawNewResponse) {
-    // P4 latency fix (2026-08-09, consult-validated): authoritative completion
-    // (provider-native end-of-answer marker, message-scoped) is hash-confirmed
-    // and timer-free — no wall clock. heuristic/weak keep the stability window
-    // (entry override > confidence map > 8s). Missing confidence ⇒ weak.
+  // 2026-08-10 (user rule): the completion gate must NOT depend on
+  // poll.state === 'completed'. That label is driver state-detection output
+  // (UI markers, stop button) — it can fail (returns idle/working) while the
+  // answer + status line are fully rendered. Gating the fallbacks on it meant
+  // a state-detection failure hung the ask forever: the stability window,
+  // hash-confirm, and bounded reminder were unreachable. CONTENT decides
+  // completion, not the label: the sentinel/shape check + stability window
+  // below are the real gates, and they work regardless of poll.state.
+  // DEBUG SWITCH (2026-08-10, user request): COMET_STRICT_COMPLETION_GATE=1
+  // restores the original poll.state==='completed' requirement — set it to
+  // reproduce/diagnose the underlying state-detection bug in isolation (the
+  // fallback would otherwise mask it). Read ONCE at module load: a per-call
+  // read is racy under node's concurrent test runner (test files share the
+  // process env) and let one file's toggle leak into another's assertions.
+  const strictGate = STRICT_COMPLETION_GATE;
+  if ((strictGate ? poll.state === 'completed' : true) && p.sawNewResponse) {
     const confidence = poll.completionConfidence ?? 'weak';
     // 2026-08-10 (user rule): for a completionMarker ask, the CODE is the
     // completion contract. A reply that lacks the sentinel AND lacks a
@@ -1145,6 +1165,13 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
       } else {
         complete = true; // reminder already sent → bounded fallback: finalize anyway
       }
+    } else if (shapeCompliant || sentinelConfirmed) {
+      // 2026-08-10 (user rule): the status line / sentinel IS the completion
+      // contract — when present, the reply is DONE regardless of confidence or
+      // poll.state (which may be idle due to broken state detection). This is
+      // the PRIMARY path: no stability window, no hash wait. (The sentinel was
+      // already stripped above; sentinelConfirmed is set when it was found.)
+      complete = true;
     } else if (confidence === 'authoritative') {
       // sentinel presence is DEFINITIVE (model wrote it last per instruction) —
       // no hash confirmation needed. NATIVE markers (grok "Worked for Xs",

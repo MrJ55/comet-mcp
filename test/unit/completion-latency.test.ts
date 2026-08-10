@@ -598,15 +598,14 @@ test('2026-08-10 user report: status-line SHAPE without the token (Turn N, date,
   } as any;
   const session = await d.open();
   const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
-  // heuristic window needs ~3s of stability → poll, wait, poll again
+  // 2026-08-10 amendment: the status line IS the completion contract — a
+  // shape-compliant reply completes IMMEDIATELY (no stability window wait), and
+  // NO reminder fires. The before-snapshot poll is consumed at dispatch.
   const p1 = await advanceAsk(dispatched.idempotencyKey);
-  assert.notEqual(p1?.status, 'reminder_sent', 'no reminder on first completed poll');
-  await new Promise((r) => setTimeout(r, 3200));
-  const p2 = await advanceAsk(dispatched.idempotencyKey);
-  assert.equal(p2?.completed, true, 'shape-compliant reply completes via the stability path');
-  assert.notEqual(p2?.status, 'reminder_sent', 'shape-compliant → NO reminder injected (user report fix)');
+  assert.equal(p1?.completed, true, 'shape-compliant reply completes immediately (status line = contract)');
+  assert.notEqual(p1?.status, 'reminder_sent', 'shape-compliant → NO reminder injected (user report fix)');
   assert.equal(d._calls.asked.length, 1, 'exactly one ask — no reminder prompt ever sent');
-  assert.ok(p2?.response.includes('Turn 6, 08/10/26, 9:07 AM EDT, Perplexity, 12%'), 'status line preserved');
+  assert.ok(p1?.response.includes('Turn 6, 08/10/26, 9:07 AM EDT, Perplexity, 12%'), 'status line preserved');
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
 });
 
@@ -677,20 +676,15 @@ test('2026-08-10 perplexity LIVE bug (reminder at 14:07:18 raced the line render
   // poll #1: answer WITHOUT the line, authoritative → not complete (code missing), no reminder
   const p1 = await advanceAsk(dispatched.idempotencyKey);
   assert.equal(p1?.completed, false, 'lineless reply: NOT complete (code missing — completion waits for the line)');
-  assert.equal(p1?.status, 'confirming', 'waits through the stability window');
+  assert.equal(p1?.status, 'confirming', 'waits for the line — never completes lineless');
   assert.equal(d._calls.asked.length, 1, 'NO reminder while the line may still render');
-  // poll #2: the status line has rendered → hash CHANGED → authoritative needs
-  // a confirm poll (still not complete, still no reminder)
+  // poll #2: the status line has RENDERED → shape-compliant → completes IMMEDIATELY
+  // (status line = the completion contract, 2026-08-10 amendment)
   const p2 = await advanceAsk(dispatched.idempotencyKey);
-  assert.equal(p2?.completed, false, 'line just rendered: hash changed → confirming one more poll');
+  assert.equal(p2?.completed, true, 'line rendered → completes immediately via the shape path');
   assert.notEqual(p2?.status, 'reminder_sent', 'NO reminder — the line arrived, no escalation needed');
-  assert.equal(d._calls.asked.length, 1, 'still exactly one ask');
-  // poll #3: stable with the line → shape-compliant + hash-confirmed → completes
-  const p3 = await advanceAsk(dispatched.idempotencyKey);
-  assert.equal(p3?.completed, true, 'line rendered + hash-confirmed → completes cleanly via the shape path');
-  assert.notEqual(p3?.status, 'reminder_sent', 'NO reminder — the line arrived before the window escalated');
   assert.equal(d._calls.asked.length, 1, 'exactly one ask — the reminder never fired');
-  assert.ok(p3?.response.includes('Turn 3, 08/10/26, 10:28 AM EDT, Perplexity, 6%'), 'status line preserved');
+  assert.ok(p2?.response.includes('Turn 3, 08/10/26, 10:28 AM EDT, Perplexity, 6%'), 'status line preserved');
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
 });
 
@@ -699,8 +693,12 @@ test('2026-08-10 stale-latch regression: a follow-up ask whose first poll reads 
   const { dispatchAsk, advanceAsk, isAskPending, _resetPendingForTests } = await import('../../dist/drivers/index.js');
   _resetForTests();
   _resetPendingForTests();
-  // Simulate a tab whose last delivered content is the P7 review (hash X): the
-  // follow-up ask's poll returns the SAME content until the new answer renders.
+  // Simulate a follow-up ask whose poll returns STALE LINELESS content (the
+  // previous turn, but WITHOUT a status line — e.g. a non-compliant previous
+  // answer). A lineless reply has no shape → the shape short-circuit cannot
+  // complete it → the ask must stay pending until genuinely new content.
+  // (Stale content WITH a status line is prevented upstream by the driver's
+  // current-turn prose scoping — that is the real stale-latch guard.)
   let pollN = 0;
   const d = {
     provider: 'perplexity',
@@ -708,11 +706,11 @@ test('2026-08-10 stale-latch regression: a follow-up ask whose first poll reads 
     ask: async () => { d._calls.asked.push('Q'); return { receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'sent' as const, recordedAt: '' } }; },
     poll: async () => {
       d._calls.polls++;
-      // poll #1 = before-snapshot: the PREVIOUS turn's content (P7 review)
-      if (d._calls.polls === 1) return { state: 'completed', steps: [], currentStep: '', response: 'P7 review content.\n\nTurn 2, 08/10/26, 10:27 AM EDT, Perplexity, 12%, AbCdEfGhIj', markdown: null, hasStopButton: false, agentBrowsingUrl: '', contentHash: 'stale-p7' };
-      // poll #2: the ask was typed; poll STILL reads the P7 content (no new answer yet)
-      if (d._calls.polls === 2) return { state: 'completed', completionConfidence: 'authoritative' as const, steps: [], currentStep: '', response: 'P7 review content.\n\nTurn 2, 08/10/26, 10:27 AM EDT, Perplexity, 12%, AbCdEfGhIj', markdown: null, hasStopButton: false, agentBrowsingUrl: '', contentHash: 'stale-p7' };
-      // poll #3+: the NEW consolidated answer has rendered
+      // poll #1 = before-snapshot (dispatch): the PREVIOUS turn's LINELESS content
+      if (d._calls.polls === 1) return { state: 'completed', steps: [], currentStep: '', response: 'P7 review content, no status line.', markdown: null, hasStopButton: false, agentBrowsingUrl: '', contentHash: 'stale-p7' };
+      // polls #2-#3: the ask was typed; polls STILL read the stale lineless content
+      if (d._calls.polls <= 3) return { state: 'completed', completionConfidence: 'authoritative' as const, steps: [], currentStep: '', response: 'P7 review content, no status line.', markdown: null, hasStopButton: false, agentBrowsingUrl: '', contentHash: 'stale-p7' };
+      // poll #4+: the NEW consolidated answer has rendered (with its status line)
       return { state: 'completed', completionConfidence: 'authoritative' as const, steps: [], currentStep: '', response: 'Consolidated position to Grok.\n\nTurn 3, 08/10/26, 10:41 AM EDT, Perplexity, 15%, ZzYyXxWwVv', markdown: null, hasStopButton: false, agentBrowsingUrl: '', contentHash: 'new-answer' };
     },
     stop: async () => true, reset: async () => {},
@@ -720,23 +718,108 @@ test('2026-08-10 stale-latch regression: a follow-up ask whose first poll reads 
     _calls: { asked: [] as string[], polls: 0 },
   } as any;
   const session = await d.open();
-  // Pre-seed the tab's delivered hash (what the P7 review already delivered)
   session.lastContentHash = 'stale-p7';
   const dispatched = await dispatchAsk(d, session, 'Follow-up?', { timeoutMs: 60000, completionMarker: true });
-  // poll #1: reads the PREVIOUS turn's content (stale-p7) — the ask just typed,
-  // no new answer yet. MUST NOT finalize with the stale P7 content.
+  // poll #1: reads the PREVIOUS turn's lineless content — NOT complete (no shape)
   const p1 = await advanceAsk(dispatched.idempotencyKey);
-  assert.equal(p1?.completed, false, 'stale previous-turn content is NOT a new response');
-  assert.notEqual(p1?.response, 'P7 review content.\n\nTurn 2, 08/10/26, 10:27 AM EDT, Perplexity, 12%, AbCdEfGhIj', 'must not deliver the previous turn\'s content');
+  assert.equal(p1?.completed, false, 'stale lineless content is NOT a new response');
+  assert.notEqual(p1?.response, 'P7 review content, no status line.', 'must not deliver the previous turn\'s content');
   assert.ok(isAskPending(dispatched.idempotencyKey), 'ask stays pending');
-  // poll #2: STILL the stale P7 content (new answer not rendered) — still pending
+  // poll #2: STILL the stale lineless content — still pending
   const p2 = await advanceAsk(dispatched.idempotencyKey);
-  assert.equal(p2?.completed, false, 'still stale — still not complete');
+  assert.equal(p2?.completed, false, 'still stale + lineless — still not complete');
   assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending');
-  // poll #3: the NEW consolidated answer rendered (hash differs) → completes
+  // poll #3: the NEW consolidated answer rendered (hash differs, has status line) → completes
   const p3 = await advanceAsk(dispatched.idempotencyKey);
   assert.equal(p3?.completed, true, 'genuinely new content → completes');
   assert.ok(p3?.response.includes('Consolidated position to Grok.'), 'delivers the NEW answer, not the stale P7');
   assert.equal(d._calls.asked.length, 1, 'no reminder fired — the new answer carried its status line');
   assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
+});
+
+test('2026-08-10 user rule: the completion gate must NOT depend on poll.state === \'completed\' — a driver that reports IDLE (state-detection failure) with a stable rendered answer still completes via the stability-window fallback', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advanceAsk, isAskPending, _resetPendingForTests } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  _resetPendingForTests();
+  // Driver that NEVER reports 'completed' (UI-marker detection broken, e.g. the
+  // CDP serialization bug making the driver see an empty bodyText): it reports
+  // idle but the response content is present and stable. The stability-window
+  // fallback must still finalize the ask — otherwise state-detection failure
+  // hangs the ask forever (live bug: WATCHING with the answer on screen).
+  let pollN = 0;
+  const d = {
+    provider: 'perplexity',
+    open: async () => ({ provider: 'perplexity', tabId: 't', targetId: 't', cdpSessionId: 'ws://x', openedAt: '', state: 'connected' }),
+    ask: async () => { d._calls.asked.push('Q'); return { receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'sent' as const, recordedAt: '' } }; },
+    poll: async () => {
+      d._calls.polls++;
+      if (d._calls.polls === 1) return { state: 'idle' as const, steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+      // the answer is fully rendered (with status line) but the driver's state
+      // detection is broken — reports idle, weak confidence, empty-ish signals
+      return { state: 'idle' as const, completionConfidence: 'weak' as const, steps: [], currentStep: '', response: 'The full stable answer.\n\nTurn 1, 08/10/26, 12:51 PM EDT, Perplexity, 8%, then the code vLAo2tnDHQ', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+    },
+    stop: async () => true, reset: async () => {},
+    health: async () => ({ provider: 'perplexity', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),
+    _calls: { asked: [] as string[], polls: 0 },
+  } as any;
+  const session = await d.open();
+  const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+  // dispatch consumed the empty before-snapshot; the first advanceAsk sees the
+  // answer WITH its status line while the driver still reports 'idle' — the
+  // shape-compliant check fires FIRST (status line = contract), so it completes
+  // immediately regardless of the broken state label.
+  const p1 = await advanceAsk(dispatched.idempotencyKey);
+  assert.equal(p1?.completed, true, 'status-line shape present → completes even though poll.state=idle');
+  assert.ok(p1?.response.includes('The full stable answer.'), 'delivers the answer');
+  assert.ok(p1?.response.includes('Turn 1, 08/10/26, 12:51 PM EDT, Perplexity, 8%, then the code vLAo2tnDHQ'), 'status line preserved');
+  assert.equal(d._calls.asked.length, 1, 'no reminder — shape-compliant reply completed cleanly');
+  assert.ok(!isAskPending(dispatched.idempotencyKey), 'finalized');
+});
+
+test('DEBUG SWITCH: COMET_STRICT_COMPLETION_GATE=1 restores the poll.state===\'completed\' requirement — the idle-state fallback does NOT fire, reproducing the original bug for diagnosis', async () => {
+  const { _resetForTests } = await import('../../dist/core/event-store.js');
+  const { dispatchAsk, advanceAsk, isAskPending, _resetPendingForTests } = await import('../../dist/drivers/index.js');
+  _resetForTests();
+  _resetPendingForTests();
+  // STRICT_COMPLETION_GATE is read ONCE at module load — an in-process env toggle
+  // is useless (the module is already loaded). Spawn a child node process with
+  // the env set so dist loads fresh with the switch ON; it runs the same
+  // scenario and reports whether the idle-state fallback fired.
+  const { execFileSync } = await import('node:child_process');
+  const script = `
+    const assert = require('node:assert');
+    const { _resetForTests } = require('./dist/core/event-store.js');
+    const { dispatchAsk, advanceAsk, isAskPending, _resetPendingForTests, STRICT_COMPLETION_GATE } = require('./dist/drivers/index.js');
+    _resetForTests(); _resetPendingForTests();
+    if (!STRICT_COMPLETION_GATE) { console.log('SWITCH NOT LOADED'); process.exit(2); }
+    let polls = 0;
+    const d = {
+      provider: 'perplexity',
+      open: async () => ({ provider: 'perplexity', tabId: 't', targetId: 't', cdpSessionId: 'ws://x', openedAt: '', state: 'connected' }),
+      ask: async () => ({ receipt: { receiptId: 'r', envelopeId: 'e', correlationId: 'c', idempotencyKey: 'k', status: 'sent', recordedAt: '' } }),
+      poll: async () => {
+        polls++;
+        if (polls === 1) return { state: 'idle', steps: [], currentStep: '', response: '', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+        return { state: 'idle', completionConfidence: 'weak', steps: [], currentStep: '', response: 'The full stable answer.\\n\\nTurn 1, 08/10/26, 12:51 PM EDT, Perplexity, 8%, then the code vLAo2tnDHQ', markdown: null, hasStopButton: false, agentBrowsingUrl: '' };
+      },
+      stop: async () => true, reset: async () => {},
+      health: async () => ({ provider: 'perplexity', healthy: true, loginRequired: false, degraded: false, hookResolution: [], lastCheckedAt: '' }),
+    };
+    (async () => {
+      const session = await d.open();
+      const dispatched = await dispatchAsk(d, session, 'Question?', { timeoutMs: 60000, completionMarker: true });
+      await advanceAsk(dispatched.idempotencyKey); // before-snapshot
+      const p2 = await advanceAsk(dispatched.idempotencyKey); // answer present, state=idle
+      assert.equal(p2.completed, false, 'strict gate: poll.state=idle blocks completion (original bug reproduces)');
+      assert.ok(isAskPending(dispatched.idempotencyKey), 'still pending');
+      console.log('STRICT GATE OK: idle-state fallback did NOT fire');
+    })().catch(e => { console.error('CHILD ERR: ' + e.message); process.exit(1); });
+  `;
+  const out = execFileSync('node', ['-e', script], {
+    cwd: 'C:/Dev/comet-mcp',
+    env: { ...process.env, COMET_STRICT_COMPLETION_GATE: '1' },
+    encoding: 'utf8',
+  });
+  assert.ok(out.includes('STRICT GATE OK'), 'child confirmed the strict gate blocks the fallback: ' + out);
 });
