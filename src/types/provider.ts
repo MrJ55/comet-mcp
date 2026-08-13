@@ -71,6 +71,16 @@ export interface PollResult {
    *  - 'weak': response-present with no marker and no stop control. Full 8s.
    */
   completionConfidence?: 'authoritative' | 'heuristic' | 'weak';
+  /**
+   * 2026-08-10 (user rule): HOW the driver determined completion. 'sentinel'
+   * = the status-line / sentinel contract was observed (the completionMarker
+   * triggered); 'fallback' = the driver had to complete via other signals
+   * (native markers / steps / stop-absent). For a completionMarker ask, a
+   * completion reached via fallback means the model skipped the sentinel — the
+   * gate's bounded reminder fires on exactly that. The driver KNOWS which one
+   * it used; the gate never re-derives it.
+   */
+  completionVia?: 'sentinel' | 'fallback';
 }
 
 /** One CDP session bound to one provider tab, with per-tab state. */
@@ -80,6 +90,15 @@ export interface TabSession {
   targetId: string;
   cdpSessionId: string;
   openedAt: string;
+  /**
+   * 2026-08-10 (ADR 0012 user directive): the URL the user STARTED the session
+   * at — for perplexity a PROJECT, for gemini a GEM — where the status-line
+   * Custom Instruction is set up manually. READ from the live tab at session
+   * open, never hardcoded. New sessions (newChat / reset / fresh tab) start at
+   * this URL so the sentinel contract applies. Absent ⇒ fall back to the entry
+   * URL.
+   */
+  sessionUrl?: string;
   /** Dedup/reconnect anchors (P3): prevent duplicate response events. */
   lastKnownMessageId?: string;
   lastCompletedAt?: string;
@@ -199,6 +218,19 @@ export interface ProviderDriver {
   reset?: { method: 'url' | 'control' | 'navigate'; url?: string };
   /** Response container selection: take the LAST matching element (common pattern). */
   extraction?: { preferLast?: boolean };
+  /**
+   * 2026-08-10 (user directive): whether this provider accepts the ADR 0010/0011
+   * status-line sentinel contract. Default true. Set false for providers that
+   * REFUSE the standing instruction (claude: "I'm not going to comply with this
+   * one" — flags it as a jailbreak; refusing fabricated turn counters). When
+   * false the ask is sent WITHOUT the sentinel instruction, no sentinel is
+   * established, and the ADR 0011 reminder NEVER fires — completion runs purely
+   * on the driver's native signals (stop-absent / response-present).
+   * NOTE (2026-08-10 ADR 0012): the session URL is NOT configured here — it is
+   * READ from the live tab where the user started the session (perplexity
+   * project / gemini Gem with the Custom Instruction).
+   */
+  completionMarker?: boolean;
 }
 
 /**

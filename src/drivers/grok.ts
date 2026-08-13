@@ -27,7 +27,8 @@ import type {
 import type { DeliveryReceipt } from '../types/conversation.js';
 import { loadEntry, resolveWithConfidence, recordSuccess, recordFailure, writeEntry } from '../core/registry.js';
 import { resolveWithRebind } from '../core/fingerprint.js';
-import { extractGrokResponse, determineGrokStatus } from '../providers/extraction.js';
+import { extractGrokResponse } from '../providers/extraction.js';
+import { detectCompletion } from '../providers/completion.js';
 import { htmlToMarkdown } from '../providers/markdown.js';
 
 const entry = () => loadEntry('grok');
@@ -212,8 +213,20 @@ export class GrokDriver implements ChatDriver {
     const messages = value.assistantMessages ?? [];
     const lastMessageText = messages[messages.length - 1] ?? '';
 
-    const status = determineGrokStatus({ lastMessageText });
-    const state = status.state;
+    // 2026-08-10 (user rule): ONE completion detector shared by ALL drivers.
+    // grok's config: status line scoped to the current turn (last message),
+    // "Working for Xs" = still generating, "Worked for Xs" = native fallback
+    // completion marker. completionVia = 'sentinel' when the status line /
+    // sentinel contract was observed, else 'fallback' (timing line only).
+    const verdict = detectCompletion({
+      provider: 'grok',
+      currentTurnText: lastMessageText,
+      bodyText,
+      hasActiveStopButton: false,
+      hasLoadingSpinner: false,
+      hasWorkingSignal: false,
+    });
+    const state = verdict.state;
     const extraction = state === 'completed' ? extractGrokResponse(messages) : null;
     // P2 markdown: convert the LAST assistant-message's innerHTML when completed
     const markdown = state === 'completed' && (value.assistantHtmls?.length ?? 0) > 0
@@ -230,8 +243,10 @@ export class GrokDriver implements ChatDriver {
       hasStopButton: false,
       agentBrowsingUrl: '',
       contentHash: extraction ? simpleHash(extraction.response) : undefined,
-      // 2026-08-09 latency fix: message-scoped "Worked for Xs" ⇒ authoritative
-      completionConfidence: status.completionConfidence,
+      // 2026-08-09 latency fix: "Worked for Xs" (native marker) ⇒ authoritative
+      completionConfidence: verdict.completionConfidence,
+      // 2026-08-10 (user rule): sentinel with fallback — same as every driver
+      completionVia: verdict.completionVia,
       extraction: extraction
         ? {
             joinedProseBlocks: extraction.joinedProseBlocks,

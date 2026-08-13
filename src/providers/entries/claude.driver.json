@@ -5,6 +5,7 @@
     "verify": "composer-emptied",
     "enterSends": false
   },
+  "completionMarker": true,
   "signals": {
     "working": { "kind": "stop-control", "selector": "button[aria-label*=\"Stop\"], button[aria-label*=\"Cancel\"], button[data-testid*=\"stop\"]" },
     "completed": { "kind": "stop-absent" },

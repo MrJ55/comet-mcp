@@ -24,8 +24,9 @@ import type { DeliveryReceipt } from '../types/conversation.js';
 import { loadEntry, resolveWithConfidence, recordSuccess, recordFailure, writeEntry } from '../core/registry.js';
 import { resolveWithRebind } from '../core/fingerprint.js';
 import {
-  extractResponse, extractSteps, determineStatus, filterProseTexts,
+  extractResponse, extractSteps, filterProseTexts,
 } from '../providers/extraction.js';
+import { detectCompletion } from '../providers/completion.js';
 import { htmlToMarkdown } from '../providers/markdown.js';
 
 /** Composer selectors used by the old CometAI, kept as the heuristic fallback chain. */
@@ -233,7 +234,12 @@ export class PerplexityDriver implements ChatDriver {
         // enables the Submit button / registers the text, so Enter+click both
         // no-op and the submit fallthrough lied (send.accepted, no response).
         // Dispatch a real InputEvent so React sees the value and enables submit.
-        editable.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(prompt)} }));
+        // 2026-08-13 (double-submit, live-verified): the InputEvent MUST NOT
+        // carry data — with data, Perplexity's editor ALSO inserts the text
+        // itself on top of execCommand's copy, doubling the prompt in the
+        // composer (empirically 2 copies). A data-less input event only
+        // triggers React's onChange (value read from the DOM = 1 copy).
+        editable.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
         return { success: true };
       }
       if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
@@ -253,6 +259,14 @@ export class PerplexityDriver implements ChatDriver {
         },
       };
     }
+
+    // 2026-08-13 (user report): Perplexity is sneaky — a fresh session on a
+    // PROJECT page defaults the composer to COMPUTER mode, not Search. The
+    // completion/sentinel contract and the council legs need Search mode (the
+    // model generates its status line there; Computer mode runs an agent that
+    // may not). The mode is a tablist: each button carries aria-pressed, and
+    // the active one is true. Ensure Search is active before submitting.
+    await this.ensureSearchMode(handle);
 
     const submitted = await this.submit(handle, composer);
     return {
@@ -280,23 +294,38 @@ export class PerplexityDriver implements ChatDriver {
     })()`);
     if (hasContent !== true) return false;
 
-    // Strategy 1: Enter key (most reliable for Perplexity)
+    // composer-emptied check (shared by all strategies). "Empty" = the prompt
+    // text is gone from the composer (submitted).
+    const isEmpty = async (): Promise<boolean> => {
+      const v = await evalValue(handle, `(() => {
+        const el = document.querySelector(${JSON.stringify(composer)});
+        if (!el) return false;
+        const val = el.isContentEditable || el.tagName === 'DIV' ? el.innerText : (el.value || '');
+        return val.trim().length < 5;
+      })()`);
+      return v === true;
+    };
+
+    // Strategy 1: Enter key (most reliable for Perplexity). 2026-08-13
+    // (double-submit race, user report): Perplexity clears the composer
+    // ASYNCHRONOUSLY after Enter — a single 500ms check can run before the
+    // clear, falsely report "not submitted", and fall through to the click
+    // fallback → the prompt was submitted TWICE. POLL for emptiness over a
+    // longer window before ever escalating.
     await evalValue(handle, `(() => { const el = document.querySelector(${JSON.stringify(composer)}); if (el) el.focus(); return true; })()`);
     await handle.pressKey('Enter');
-    await new Promise((r) => setTimeout(r, 500));
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await new Promise((r) => setTimeout(r, 400));
+      if (await isEmpty()) return true;
+      // also accept the loading indicator as evidence the submit registered
+      const loading = await evalValue(handle, `document.querySelector('[class*="animate"]') !== null`);
+      if (loading === true) return true;
+    }
 
-    // check submitted (composer emptied or loading)
-    const submitted = await evalValue(handle, `(() => {
-      const el = document.querySelector(${JSON.stringify(composer)});
-      if (el) {
-        const v = el.isContentEditable || el.tagName === 'DIV' ? el.innerText : (el.value || '');
-        if (v.trim().length < 5) return true;
-      }
-      return document.querySelector('[class*="animate"]') !== null;
-    })()`);
-    if (submitted === true) return true;
-
-    // Strategy 2: click submit button (from entry, with rebind)
+    // Strategy 2: click submit button — ONLY if the composer still holds the
+    // prompt (the Enter genuinely did not submit; never re-submit after a
+    // race where Enter actually worked).
+    if (await isEmpty()) return true;
     const sendSel = await findSendButton(handle);
     if (sendSel) {
       const clicked = await evalValue(handle, `(() => {
@@ -305,15 +334,11 @@ export class PerplexityDriver implements ChatDriver {
         b.click(); return true;
       })()`);
       if (clicked === true) {
-        await new Promise((r) => setTimeout(r, 700));
-        // verify the composer actually emptied (the click really submitted)
-        const emptied = await evalValue(handle, `(() => {
-          const el = document.querySelector(${JSON.stringify(composer)});
-          if (!el) return false;
-          const v = el.isContentEditable || el.tagName === 'DIV' ? el.innerText : (el.value || '');
-          return v.trim().length < 5;
-        })()`);
-        return emptied === true;
+        // poll for the composer to empty (the click really submitted)
+        for (let attempt = 0; attempt < 5; attempt++) {
+          await new Promise((r) => setTimeout(r, 400));
+          if (await isEmpty()) return true;
+        }
       }
     }
 
@@ -321,14 +346,41 @@ export class PerplexityDriver implements ChatDriver {
     // (2026-08-10 bug: this returned true unconditionally, recording send.accepted
     // while nothing was submitted — the prompt never rendered, no response).
     await handle.pressKey('Enter');
-    await new Promise((r) => setTimeout(r, 700));
-    const emptied = await evalValue(handle, `(() => {
-      const el = document.querySelector(${JSON.stringify(composer)});
-      if (!el) return false;
-      const v = el.isContentEditable || el.tagName === 'DIV' ? el.innerText : (el.value || '');
-      return v.trim().length < 5;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await new Promise((r) => setTimeout(r, 400));
+      if (await isEmpty()) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 2026-08-13 (user report): Perplexity is sneaky — a fresh session on a
+   * PROJECT page defaults the composer to COMPUTER mode, not Search. The
+   * sentinel contract (and the council legs) need Search mode: the model
+   * generates its status line there; Computer mode runs an agent that may not.
+   * The mode is a tablist of buttons, each with aria-pressed; the active one
+   * is true. If Search is NOT active, click the Search button (the toggle is
+   * visible in the composer). No-op when already in Search mode.
+   */
+  private async ensureSearchMode(handle: TabCDPHandle): Promise<void> {
+    const active = await evalValue(handle, `(() => {
+      const btns = [...document.querySelectorAll('button')].filter(b => /^(Search|Computer)$/.test((b.innerText || '').trim()));
+      const search = btns.find(b => (b.innerText || '').trim() === 'Search');
+      return search ? search.getAttribute('aria-pressed') : null;
     })()`);
-    return emptied === true;
+    if (active === 'true') return; // already Search mode
+    // click the Search toggle button
+    const clicked = await evalValue(handle, `(() => {
+      const btns = [...document.querySelectorAll('button')].filter(b => (b.innerText || '').trim() === 'Search');
+      const search = btns.find(b => b.offsetParent !== null);
+      if (!search) return false;
+      search.click();
+      return true;
+    })()`);
+    if (clicked === true) {
+      // let the mode switch settle before submit
+      await new Promise((r) => setTimeout(r, 600));
+    }
   }
 
   async poll(session: TabSession): Promise<PollResult> {
@@ -383,33 +435,30 @@ export class PerplexityDriver implements ChatDriver {
     // UI drift, and gating extraction on them hid the rendered reply (live bug
     // 2026-08-10: ask stuck WATCHING forever with the answer on screen).
     const joinedProse = (value.proseTexts ?? []).join('\n\n').trimEnd();
-    // status line = a full line starting with "Turn N," (may carry
-    // ", then the code <sentinel>" after the %); captures the ENTIRE line so
-    // the sentinel survives for the gate's stripSentinel. Lookahead to UI
-    // chrome (Sources / Ask a follow-up / EOF) guards against mid-thread
-    // matches on older turns.
-    const STATUS_LINE_RE = /Turn \d+,\s*\d{2}\/\d{2}\/\d{2},[^\n]+(?=[\s\S]*?(?:Ask a follow-up|Sources|Search|$))/g;
-    // 2026-08-10 (multi-turn leak): bodyText contains ALL turns' status lines —
-    // take the LAST one (the current turn's), never the first (match() returns
-    // the first; an old turn's line was appended to the response).
-    const statusLineMatches = bodyText.match(STATUS_LINE_RE) ?? [];
-    const statusLineMatch = statusLineMatches.length > 0 ? statusLineMatches[statusLineMatches.length - 1] : null;
-    const hasStatusLine = !!statusLineMatch || /^Turn \d+,\s*\d{2}\/\d{2}\/\d{2},.*\d+%(?:\s*,\s*\S+)?$/m.test(joinedProse);
-    const status = hasStatusLine
-      ? { state: 'completed' as const, completionConfidence: 'authoritative' as const }
-      : determineStatus({
-          hasActiveStopButton: value.hasActiveStopButton === true,
-          hasLoadingSpinner: value.hasLoadingSpinner === true,
-          bodyText,
-        });
+    // 2026-08-10 (user rule): ONE completion detector shared by ALL drivers —
+    // detectCompletion() (src/providers/completion.ts). The status-line /
+    // sentinel contract, working-state, fallback markers, confidence, and
+    // completionVia all come from the shared, provider-parameterized detector.
+    const verdict = detectCompletion({
+      provider: 'perplexity',
+      // the status line renders OUTSIDE prose — the detector's perplexity
+      // config scopes status-line detection to bodyText
+      currentTurnText: joinedProse,
+      bodyText,
+      hasActiveStopButton: value.hasActiveStopButton === true,
+      hasLoadingSpinner: value.hasLoadingSpinner === true,
+      hasWorkingSignal: true,
+    });
+    const status = verdict;
     const { steps, currentStep } = extractSteps(bodyText);
     const extraction = status.state === 'completed' ? extractResponse(value.proseTexts ?? []) : null;
     // 2026-08-10: the status line + sentinel render OUTSIDE [class*="prose"]
     // (bodyText only) — append it to the response so the gate's sentinel strip
     // and shape check see it; otherwise a completed reply looks lineless and
-    // the marker-ask gate waits/reminds needlessly.
+    // the marker-ask gate waits/reminds needlessly. The shared detector
+    // returns the observed line (last match — the current turn's).
     let response = extraction?.response ?? '';
-    const statusLineText = statusLineMatch ? statusLineMatch[0].trim() : '';
+    const statusLineText = status.statusLine ? status.statusLine.trim() : '';
     // 2026-08-10: append UNCONDITIONALLY when detected — the status line can
     // appear mid-prose (UI-rendered) but stripSentinel requires it at the END.
     // Dropping it (or skipping when includes() matches mid-body) made a
@@ -434,6 +483,10 @@ export class PerplexityDriver implements ChatDriver {
       contentHash: response ? simpleHash(response) : undefined,
       // 2026-08-09 latency fix: follow-up/Finished ⇒ authoritative; steps-only ⇒ heuristic
       completionConfidence: status.completionConfidence,
+      // 2026-08-10 (user rule): the driver KNOWS how it completed — sentinel
+      // (status line observed) or fallback (markers/steps). The gate's bounded
+      // reminder fires when a completionMarker ask completed via fallback.
+      completionVia: status.completionVia,
       extraction: extraction
         ? {
             joinedProseBlocks: extraction.joinedProseBlocks,

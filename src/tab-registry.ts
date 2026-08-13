@@ -23,7 +23,12 @@ import type { TabSession } from './types/provider.js';
 import type { ProviderId } from './types/conversation.js';
 import type { CDPTarget } from './types.js';
 
-/** Provider → entry URL for opening tabs. Falls back per-provider below. */
+/** Provider → URL for opening tabs. 2026-08-10 (ADR 0012): the session URL is
+ * READ from the live tab the user started (project/Gem with the status-line
+ * Custom Instruction) — captured on TabSession at pool time, used by reset /
+ * new-tab opens. This function is the FALLBACK (no session URL known yet):
+ * entry URL, then per-provider fallbacks.
+ */
 function entryUrlFor(provider: ProviderId): string {
   const e = loadEntry(provider);
   if (e?.url) return e.url;
@@ -163,6 +168,13 @@ export class TabRegistry {
     };
     session.provider = provider;
     session.state = 'connected';
+    // 2026-08-10 (ADR 0012 user directive): READ the session URL from the LIVE
+    // tab — the user starts the session in a perplexity PROJECT or gemini GEM
+    // where the status-line Custom Instruction is set up manually. Never
+    // hardcoded; new sessions (newChat / reset / fresh tab) start at this URL.
+    if (target.url && target.url !== 'about:blank') {
+      session.sessionUrl = target.url;
+    }
     // P3 reconnect-dedup: hydrate dedup anchors from the DURABLE store so a
     // re-opened / reconnected session starts from the last recorded extraction
     // cursor — "unchanged content produces no new response event".
@@ -239,7 +251,10 @@ export class TabRegistry {
     if (!session) throw new Error(`no session for tab: ${tabId}`);
     const handle = sessionPool.get(tabId);
     if (!handle) throw new Error(`no pooled session for tab: ${tabId} — reopen with provider_open`);
-    await handle.navigate(entryUrlFor(session.provider), true);
+    // 2026-08-10 (ADR 0012): start the new session at the URL the user started
+    // this one at (the project/Gem with the Custom Instruction) — read from the
+    // live tab at open, never hardcoded; fall back to the entry URL.
+    await handle.navigate(session.sessionUrl ?? entryUrlFor(session.provider), true);
     await new Promise((r) => setTimeout(r, 1500));
     // 2026-08-10: the thread is dead — notify observers so per-thread state
     // (session sentinel) is invalidated before the next ask re-injects it.
@@ -266,7 +281,14 @@ export class TabRegistry {
   }
 
   private async openNewProviderTab(provider: ProviderId): Promise<CDPTarget> {
-    const url = entryUrlFor(provider);
+    // 2026-08-10 (ADR 0012): a fresh tab starts at the provider's SESSION URL
+    // (the project/Gem with the Custom Instruction, read from the live tab the
+    // user opened) when one is known — else the entry URL.
+    const sessionUrl = (this.providerTabs.get(provider) ?? [])
+      .map((id) => this.tabs.get(id))
+      .filter((s): s is TabSession => !!s && !!s.sessionUrl)
+      .sort((a, b) => b.openedAt.localeCompare(a.openedAt))[0]?.sessionUrl;
+    const url = sessionUrl ?? entryUrlFor(provider);
     return cometClient.newTab(url);
   }
 }

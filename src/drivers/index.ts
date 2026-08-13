@@ -12,7 +12,7 @@ import type { ChatDriver, PollResult, TabSession } from '../types/provider.js';
 import type { ProviderId } from '../types/conversation.js';
 import { writeFileSync, mkdirSync, readFileSync, unlinkSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
-import { packageRoot } from '../core/registry.js';
+import { packageRoot, loadEntry } from '../core/registry.js';
 import { sessionPool } from '../cdp-pool.js';
 import { tabRegistry } from '../tab-registry.js';
 import { perplexityDriver } from './perplexity.js';
@@ -356,14 +356,55 @@ export function generateSentinel(): string {
 /**
  * Append the status-line instruction to a prompt (ADR 0010/0011). The
  * instruction establishes a THREAD CONVENTION: every reply in this session ends
- * with one status line (turn, MM/DD/YY, time+timezone, model, context%, then
- * the sentinel LAST). Verified live on grok/perplexity (full compliance) and
- * claude (partial — honest about estimates, 2026-08-09). Context% is the model's
- * own estimate of tokens-used ÷ window — observability, never trusted as truth.
- * Tightened for briefness + repeatable results (user request 2026-08-09).
+ * with one status line carrying the sentinel LAST. The OTHER fields (turn,
+ * date, time, model, context%) are OPTIONAL — the model may estimate them or
+ * skip them entirely (claude refuses fabricated turn counters / context%,
+ * 2026-08-10). ONLY the sentinel code is MANDATORY — the completion contract is
+ * its presence at the end of the line. Context% is the model's own estimate of
+ * tokens-used ÷ window — observability, never trusted as truth.
  */
-export function withSentinelInstruction(prompt: string, sentinel: string): string {
-  return `${prompt}\n\n(Technical: end EVERY reply in this session with one final line in this exact format: Turn <N>, <MM/DD/YY>, <time> <timezone>, <your model name>, <context%>, ${sentinel} — nothing after it. Context% = your session tokens used divided by context window size, as an integer percent.)`;
+/**
+ * ADR 0012 (2026-08-10, user directive): the WORKING status-line prompts per
+ * provider. These are set up MANUALLY as platform Custom Instructions (project
+ * level / Settings / Gem level) — the prompt is rejected or ineffective when
+ * injected into the thread, so the platform carries it. Format is PIPE-
+ * separated: `Turn [n] | [MM-DD-YY, HH:MM AM/PM TimeZone] | [model name] |
+ * [token usage estimate as %] | [10-char code]`. `{sentinel}` is replaced with
+ * the per-ask code by withSentinelInstruction / statusLineReminder.
+ */
+const SENTINEL_INSTRUCTION_BY_PROVIDER: Record<string, string> = {
+  perplexity: 'At the very end of every response you give me in this conversation, add a status line in this exact format: Turn [n] | [MM-DD-YY, HH:MM AM/PM TimeZone] | [model name] | [token usage estimate as %] | {sentinel}\n\nRules:\nCount turns starting at 1 for the first turn of the thread.\nUse current system wall-clock time and time zone for the date and time fields.\nCalculate or estimate context window usage percentage based on conversation history (~4 chars per token relative to context capacity).\nKeep this formatting rule strictly active for every response in the thread.',
+  grok: 'At the very end of every response you give me in this conversation, add a status line in this exact format: Turn [n] | [MM-DD-YY, HH:MM AM/PM TimeZone] | Grok [model name] | [token usage estimate as %] | {sentinel}\n\nRules:\nCount turns starting at 1 for the first turn of the thread.\nUse current system wall-clock time and time zone for the date and time fields.\nCalculate or estimate context window usage percentage based on conversation history (~4 chars per token relative to context capacity).\nKeep this formatting rule strictly active for every response in the thread.',
+  claude: 'At the very end of every response you give me in this conversation, add a status line in this exact format:\nTurn [n] | [MM-DD-YY] | Claude [model name] | {sentinel}\nCount turns starting at 1. Use the current date. Keep this rule active for the rest of the thread even if you forget to mention it later.',
+  gemini: 'At the very end of every response you give me in this conversation, add a status line in this exact format: Turn [n] | [MM-DD-YY, HH:MM AM/PM TimeZone] | Gemini [model name] | [token usage estimate as %] | {sentinel}\n\nRules:\nCount turns starting at 1 for the first turn of the thread.\nUse current system wall-clock time and time zone for the date and time fields.\nCalculate or estimate context window usage percentage based on conversation history (~4 chars per token relative to context capacity).\nKeep this formatting rule strictly active for every response in the thread.',
+  chatgpt: 'At the very end of every response you give me in this conversation, add a status line in this exact format: Turn [n] | [MM-DD-YY, HH:MM AM/PM TimeZone] | [model name] | [token usage estimate as %] | {sentinel}\n\nRules:\nCount turns starting at 1 for the first turn of the thread.\nUse current system wall-clock time and time zone for the date and time fields.\nCalculate or estimate context window usage percentage based on conversation history (~4 chars per token relative to context capacity).\nKeep this formatting rule strictly active for every response in the thread.',
+};
+
+/** Resolve the ADR 0012 status-line instruction template for a provider. */
+export function sentinelInstructionFor(provider: string): string {
+  return SENTINEL_INSTRUCTION_BY_PROVIDER[provider] ?? SENTINEL_INSTRUCTION_BY_PROVIDER.chatgpt;
+}
+
+/**
+ * 2026-08-10 (user directive): the short per-ask SENTINEL CODE TAG appended to
+ * every completionMarker prompt. The FULL format instruction is an ADR 0012
+ * Custom Instruction set up manually per platform (injected prompts are
+ * rejected / ineffective) — so the driver only communicates the per-ask code
+ * the model must end the status line with. This is the completion contract.
+ */
+export function sentinelCodeTag(sentinel: string): string {
+  return `(Status-line sentinel code for this reply: ${sentinel} — end the status line with exactly this code.)`;
+}
+
+/**
+ * Append the status-line instruction to a prompt (ADR 0010/0011). Uses the
+ * ADR 0012 per-provider WORKING prompt (Custom Instruction text). Note: per
+ * the 2026-08-10 user directive this is NOT injected on the first turn of a
+ * new thread (the platform Custom Instruction already carries it) — it is used
+ * by statusLineReminder and available for reference.
+ */
+export function withSentinelInstruction(prompt: string, sentinel: string, provider = 'chatgpt'): string {
+  return `${prompt}\n\n(Technical: ${sentinelInstructionFor(provider).replace('{sentinel}', sentinel)})`;
 }
 
 /**
@@ -390,8 +431,25 @@ export function parseStatusLine(text: string, sentinel: string): {
   if (!lastLine.includes(sentinel)) return { found: false, complete: false };
   const parts = lastLine.split(',').map((p) => p.trim());
   const [turn, date, time, model, contextPct] = parts;
+  // 2026-08-10 (user directive): fields are OPTIONAL — the model may estimate
+  // or skip them (claude refuses fabricated counters). The SENTINEL is the only
+  // mandatory part; 'complete' (all fields) is observability, never a gate.
   const complete = parts.length >= 6 && !!turn && !!date && !!time && !!model && !!contextPct;
   return { found: true, complete, line: lastLine, turn, date, time, model, contextPct };
+}
+
+/**
+ * 2026-08-10 (user directive): the completion signal is a 10-char alphanumeric
+ * token at the VERY END of the model's reply — nothing else. The model
+ * generates it per its ADR 0012 Custom Instruction; we DETECT it, we do NOT
+ * control or verify its value (we don't inject a code). We must NOT rely on
+ * the "Turn" line shape, the driver's confidence, or anything else for the
+ * marker path.
+ */
+export function hasTrailingToken(text: string): boolean {
+  const trimmed = text.trimEnd();
+  if (!trimmed) return false;
+  return /[A-Za-z0-9]{10}$/.test(trimmed);
 }
 
 /**
@@ -402,6 +460,24 @@ export function parseStatusLine(text: string, sentinel: string): {
  * 0011 reminder must NOT fire (it interrupts the thread for nothing). The
  * reply still completes through the normal stability window / hash-confirm.
  */
+/**
+ * 2026-08-10 (user directive): fields are OPTIONAL — the model may estimate or
+ * skip them (claude refuses fabricated counters). The shape is ANY line
+ * starting with "Turn" (with or without the trailing fields); the SENTINEL is
+ * the only mandatory part and is checked separately (stripSentinel).
+ */
+/**
+ * 2026-08-10 (perplexity live bug, user report): detect a trailing status-line
+ * SHAPE without requiring the sentinel token. The model followed the convention
+ * (Turn <N>, <MM/DD/YY>, <time> <tz>, <model>, <context%>) but dropped the
+ * control token — that is COMPLIANT-enough: the line is present, so the ADR
+ * 0011 reminder must NOT fire (it interrupts the thread for nothing). The
+ * reply still completes through the normal stability window / hash-confirm.
+ * 2026-08-10 (user directive): fields are OPTIONAL — the model may estimate or
+ * skip them (claude refuses fabricated counters). The shape is ANY line
+ * starting with "Turn" (with or without the trailing fields); the SENTINEL is
+ * the only mandatory part and is checked separately (stripSentinel).
+ */
 export function parseStatusLineShape(text: string): {
   found: boolean;
   line?: string;
@@ -410,23 +486,64 @@ export function parseStatusLineShape(text: string): {
   if (!trimmed) return { found: false };
   const lines = trimmed.split('\n');
   const lastLine = lines[lines.length - 1] ?? '';
-  // Turn <N>, <MM/DD/YY>, <time> <tz>, <model>, <context%>  (5 parts, NO token)
-  if (!/^Turn \d+/.test(lastLine)) return { found: false };
-  const parts = lastLine.split(',').map((p) => p.trim());
-  if (parts.length < 5) return { found: false };
-  const [turn, date, time, model, contextPct] = parts;
-  const ok = !!turn && /^\d{2}\/\d{2}\/\d{2}$/.test(date ?? '') && !!time && !!model && /^\d+%$/.test(contextPct ?? '');
-  return ok ? { found: true, line: lastLine } : { found: false };
+  // shape = the last line is a status line: starts with "Turn" (pipe-separated
+  // per ADR 0012, or comma/space — fields may be estimated, partial, or skipped)
+  if (!/^Turn(?:\s|,|\||$)/.test(lastLine)) return { found: false };
+  const parts = lastLine.split(',').map((p) => p.trim()).filter(Boolean);
+  // require at least "Turn" + one value, or the sentinel (which is the only
+  // mandatory part); a bare "Turn <sentinel>" also counts
+  if (parts.length < 1) return { found: false };
+  if (/^Turn(?:\s|,|\||$)/.test(parts[0] ?? '') && parts.length >= 1) {
+    return { found: true, line: lastLine };
+  }
+  return { found: false };
 }
 
 /**
- * The reminder prompt (ADR 0011): injected into the thread when a completed
- * reply is missing the status line. Asks for ONLY the status line, verbatim
- * format, same sentinel. The model's reply should itself end with the line —
- * the compliance loop re-checks on the next poll.
+ * 2026-08-10 (live council test): the LAST status line anywhere in a response
+ * (the reminder's own reply renders as a bare "Turn N, …" element, possibly
+ * with a trailing mid-render fragment from the next line).
  */
-export function statusLineReminder(sentinel: string): string {
-  return `(Technical: your previous reply was missing the required final status line that every reply in this session must end with. Reply with ONLY that line, in this exact format: Turn <N>, <MM/DD/YY>, <time> <timezone>, <your model name>, <context%>, ${sentinel} — nothing after it. Context% = your session tokens used divided by context window size, as an integer percent. Nothing else.)`;
+export function lastStatusLine(text: string): string {
+  const m = [...text.matchAll(/^Turn(?:\s|,)[^\n]*/gm)];
+  return m.length ? m[m.length - 1][0] : text.trim();
+}
+
+/**
+ * 2026-08-10 (live council test): true when a response is ONLY a status line
+ * (plus at most a tiny trailing fragment) — i.e. it carries no substantive
+ * answer text. The reminder prompt tells the model to "Reply with ONLY that
+ * line", so its turn renders as a bare line; the driver's current-turn
+ * scoping (last prose element) would otherwise deliver that bare line as the
+ * answer, losing the real pre-reminder response.
+ */
+export function isBareStatusLine(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const without = trimmed.replace(/^Turn(?:\s|,)[^\n]*/gm, '');
+  return without.trim().length <= 2;
+}
+
+/**
+ * The reminder prompt (ADR 0011, 2026-08-10 user-validated phrasing): injected
+ * into the thread when a completed reply is missing the status line. The
+ * WORKING phrasing (user directive): "You forgot the status line on your last
+ * response — please add it now in the format <per-provider ADR 0012 format>
+ * and keep including it going forward." This soft-nudge phrasing works even on
+ * claude (which rejects the old "Reply with ONLY that line" framing).
+ */
+export function statusLineReminder(sentinel: string, provider = 'chatgpt'): string {
+  // 2026-08-10 (user directive): the MODEL generates its own code per the
+  // Custom Instruction — we don't control it, so the reminder uses the
+  // placeholder "[code]" unless a code is passed (legacy callers).
+  const code = sentinel || '[code]';
+  // the ADR 0012 template embeds the format line: "...in this exact format:
+  // <format>" — extract just the format (with the sentinel substituted), not
+  // the whole template + rules
+  const template = sentinelInstructionFor(provider).replace('{sentinel}', code);
+  const formatMatch = template.match(/in this exact format:\s*\n?\s*([^\n]+)/);
+  const format = formatMatch?.[1]?.trim() ?? `Turn [n] | [MM-DD-YY] | [model name] | ${code}`;
+  return `(You forgot the status line on your last response — please add it now in the format ${format} and keep including it going forward.)`;
 }
 
 /**
@@ -441,11 +558,30 @@ export function statusLineReminder(sentinel: string): string {
 export function stripSentinel(text: string, sentinel: string): { text: string; found: boolean } {
   if (!sentinel) return { text, found: false };
   const trimmed = text.trimEnd();
-  if (!trimmed.endsWith(sentinel)) return { text, found: false };
-  // remove ONLY the token + the separator right before it (", " or whitespace),
-  // leaving the status line intact: "...2%, <token>" → "...2%"
-  const without = trimmed.slice(0, -sentinel.length).replace(/[,\s]+$/, '');
-  return { text: without, found: true };
+  // 2026-08-10: separator before the token can be ", ", whitespace, OR the
+  // ADR 0012 pipe " | " — strip all of them so the status line stays clean.
+  const stripSep = (s: string) => s.replace(/[,\s|]+$/, '');
+  // PRIMARY: the response ends with the sentinel (bare token, or status line
+  // + token — the model was told to put the token last, nothing after).
+  if (trimmed.endsWith(sentinel)) {
+    return { text: stripSep(trimmed.slice(0, -sentinel.length)), found: true };
+  }
+  // 2026-08-10 (live): Perplexity streams the NEXT turn's render into the same
+  // container, so a tiny mid-render fragment can trail the sentinel
+  // ("…15%, <sentinel>\n\nT"). The sentinel is still the LAST TOKEN of the
+  // status line — the completionMarker triggered. Recognize it there; a
+  // trailing fragment ≤2 chars (a stray "T"/"T\n") is render noise, dropped.
+  // 2026-08-10 (user directive): fields are optional — match ANY "Turn" line.
+  const lastLineMatch = [...trimmed.matchAll(/^Turn(?:\s|,|\|)[^\n]*/gm)].pop();
+  if (!lastLineMatch) return { text, found: false };
+  const line = lastLineMatch[0];
+  const trailingAfterLine = trimmed.slice(lastLineMatch.index! + line.length);
+  const trailingFragment = trailingAfterLine.trim().length <= 2;
+  if (!line.trimEnd().endsWith(sentinel)) return { text, found: false };
+  const lineWithout = line.slice(0, -sentinel.length).replace(/[,\s|]+$/, '');
+  const prefix = trimmed.slice(0, lastLineMatch.index!);
+  const rebuilt = prefix + lineWithout + (trailingFragment ? '' : trailingAfterLine);
+  return { text: rebuilt.trimEnd(), found: true };
 }
 
 /** Clean up expired + over-count responses on startup and after each write. */
@@ -853,6 +989,15 @@ interface PendingAsk {
    */
   reminderSent?: boolean;
   /**
+   * 2026-08-10 (live council test): the lineless response captured BEFORE the
+   * reminder was injected. The reminder's own reply is often a BARE status
+   * line (the model was told to reply with only the line) which the driver's
+   * last-element scoping reads as the current turn — stitching the
+   * pre-reminder answer back in keeps the delivered response the real answer
+   * (plus the line), never just the reminder turn.
+   */
+  preReminderResponse?: string;
+  /**
    * 2026-08-10 (live council test): whether the driver VERIFIED the prompt
    * actually submitted (e.g. grok composer emptied). False ⇒ never enter the
    * compliance/reminder loop (a phantom send must not trigger a reminder).
@@ -937,22 +1082,30 @@ export async function dispatchAsk(
     return { correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey, status: 'completed', replayed: true };
   }
 
-  // ADR 0010/0011: optional sentinel completion marker. The status-line
-  // instruction is a THREAD CONVENTION — injected ONCE per tab (first
-  // completionMarker ask); later asks reuse the session sentinel for detection
-  // WITHOUT re-broadcasting the instruction (user report 2026-08-10: the full
-  // block was being resubmitted with every prompt). Reminders cover
-  // non-compliance. Absent ⇒ normal heuristic/weak path.
-  const existingSentinel = sessionSentinels.get(session.targetId);
-  const isFirstInTab = opts.completionMarker && existingSentinel === undefined;
-  const sentinel = opts.completionMarker ? (existingSentinel ?? generateSentinel()) : undefined;
-  if (isFirstInTab && sentinel) sessionSentinels.set(session.targetId, sentinel);
+  // ADR 0012 (2026-08-10, user-validated): the status line is a platform
+  // Custom Instruction set up manually per provider. The MODEL generates the
+  // full status line INCLUDING its own 10-char code — we do NOT control what
+  // the code is, we only DETECT the line at the end of the reply (any "Turn …
+  // | … | <10-char token>" line = the completionMarker triggered). No sentinel
+  // is generated, no code tag is injected, no session sentinel is tracked —
+  // the ask goes out raw (plus the dispatch timestamp). completionMarker:true
+  // simply enables status-line detection + the bounded reminder for providers
+  // that have the Custom Instruction set up (completionMarker:false ⇒ ask sent
+  // raw, no reminder, native-signal completion only).
+  const markerWanted = opts.completionMarker === true
+    && loadEntry(driver.provider)?.driver?.completionMarker !== false;
   // 2026-08-10 (user request): stamp the DISPATCH time into the wire prompt so
   // generation + completion-detection latency are measurable end-to-end —
   // prompt-sent time (here) vs status-line time (model's own clock) vs
   // response.received (detection). Visible in the thread and the event store.
   const sentAt = new Date().toISOString();
-  const wirePrompt = `${(isFirstInTab ? withSentinelInstruction(prompt, sentinel!) : prompt)}\n\n[prompt sent at ${sentAt}]`;
+  // 2026-08-10 (user directive, ADR 0012): the FULL status-line instruction is
+  // an ADR 0012 Custom Instruction set up manually per platform (project level
+  // ADR 0012 (2026-08-10, user-validated): the status-line format is a
+  // platform Custom Instruction — the driver never injects it. The ask goes
+  // out RAW (plus the dispatch timestamp). The MODEL generates the status line
+  // with its own code; we detect it at completion.
+  const wirePrompt = `${prompt}\n\n[prompt sent at ${sentAt}]`;
 
   // durable lifecycle: envelope.created → send.queued → snapshot → ask → accepted
   recordEnvelopeCreated({ ...envelope, content: wirePrompt });
@@ -977,7 +1130,6 @@ export async function dispatchAsk(
     phase: 'active',
     stepsCollected: [], sawNewResponse: false,
     last: null, prevHash: null, stableSince: null,
-    sentinel,
     sendVerified,
   });
   lastDispatched.set(driver.provider, askKey(envelope));
@@ -1070,36 +1222,13 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   }
   p.last = poll;
   for (const step of poll.steps) if (!p.stepsCollected.includes(step)) p.stepsCollected.push(step);
-  // ADR 0010 sentinel marker: if the model ended with the per-ask sentinel, the
-  // response is AUTHORITATIVELY complete — strip the sentinel BEFORE hashing so
-  // stored content/hash/relay are clean, and mark confidence authoritative so
-  // the gate is hash-confirmed + timer-free. Non-compliant model (no sentinel)
-  // → unchanged fallback (provider heuristic/weak).
-  // ADR 0010 sentinel marker: if the model ended with the per-ask sentinel, the
-  // response is AUTHORITATIVELY complete — strip the sentinel BEFORE hashing so
-  // stored content/hash/relay are clean. Sentinel presence is DEFINITIVE (the
-  // model was instructed to put it last, nothing after) — it does NOT need hash
-  // confirmation, unlike native markers that could theoretically appear
-  // mid-stream. Non-compliant model (no sentinel) → ADR 0011 reminder loop.
-  let sentinelConfirmed = false;
-  if (p.sentinel) {
-    const stripped = stripSentinel(poll.response, p.sentinel);
-    if (stripped.found) {
-      // strip from BOTH text and markdown (the driver converts HTML → markdown
-      // before we see it, so the sentinel can appear in either — leak caught
-      // live on claude 2026-08-09)
-      const mdStripped = poll.markdown ? stripSentinel(poll.markdown, p.sentinel) : null;
-      poll = {
-        ...poll,
-        response: stripped.text,
-        markdown: mdStripped?.found ? mdStripped.text : poll.markdown,
-        completionConfidence: 'authoritative',
-      };
-      sentinelConfirmed = true;
-    }
-  }
-  // recompute the hash from the (possibly sentinel-stripped) response so the
-  // durable contentHash always matches the stored text
+  // ADR 0012 (2026-08-10, user directive): the completionMarker is the STATUS
+  // LINE the model generates per its platform Custom Instruction, including
+  // the model's OWN 10-char code — we do NOT control what the code is, we only
+  // DETECT the line (parseStatusLineShape in the gate below). The model's code
+  // is kept as-is in the response (provenance: which model, when) — there is
+  // no pre-known sentinel to strip. Shape-compliant line = the completionMarker
+  // triggered.
   const hash = simpleHash(poll.response);
   if (poll.response.length > 0 && (hash !== p.beforeHash || poll.response.length > p.beforeLen)) {
     // 2026-08-10: sawNewResponse means the response text changed since dispatch.
@@ -1130,62 +1259,45 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
   const strictGate = STRICT_COMPLETION_GATE;
   if ((strictGate ? poll.state === 'completed' : true) && p.sawNewResponse) {
     const confidence = poll.completionConfidence ?? 'weak';
-    // 2026-08-10 (user rule): for a completionMarker ask, the CODE is the
-    // completion contract. A reply that lacks the sentinel AND lacks a
-    // status-line shape is NOT complete — regardless of native markers or hash
-    // confirmation — because the model was instructed to end with the line and
-    // the line renders LAST (perplexity appends it after the answer, observed
-    // live 14:07:18→14:07:24). Completion therefore waits for the line.
-    const shapeCompliant = parseStatusLineShape(poll.response).found;
+    // 2026-08-10 (user directive, ADR 0012): the completion signal is a 10-char
+    // alphanumeric token at the VERY END of the model's reply — NOTHING else.
+    // The model generates it per its platform Custom Instruction; we DETECT it,
+    // we do not control or verify its value. hasTrailingToken ⇒ the
+    // completionMarker triggered — authoritative, no stability window, no hash
+    // wait, regardless of confidence or poll.state.
+    const tokenPresent = hasTrailingToken(poll.response);
     let complete: boolean;
-    if (p.sentinel && !sentinelConfirmed && !shapeCompliant) {
-      // completionMarker ask, code missing: NOT complete. Hold the stability
-      // window to give the line a chance to render (when it renders, the hash
-      // changes and this branch re-evaluates on the next poll). The wait is
-      // floored at the heuristic window (3s) even for authoritative confidence
-      // — a 0ms window would escalate on the first poll, before the line has
-      // had any chance to render. Only when the window has held on a STILL
-      // lineless reply do we escalate: one bounded reminder, then a bounded
-      // fallback so the ask never hangs.
-      const windowMs = Math.max(windowForPoll(poll), CONFIDENCE_WINDOWS.heuristic);
-      const stability = completionStability(hash, p.prevHash, p.stableSince, Date.now(), windowMs);
-      p.stableSince = stability.stableSince;
-      if (!stability.complete) {
-        complete = false; // waiting for the line — keep confirming
-      } else if (!p.reminderSent && p.sendVerified) {
-        p.reminderSent = true;
-        recordSendEvent({ ...envelope, content: p.prompt }, 'send.queued');
-        await driver.ask(session, statusLineReminder(p.sentinel));
-        return {
-          completed: false, response: '', markdown: null, steps: p.stepsCollected,
-          currentStep: '', status: 'reminder_sent',
-          agentBrowsingUrl: '', timedOut: false,
-          correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
-        };
-      } else {
-        complete = true; // reminder already sent → bounded fallback: finalize anyway
-      }
-    } else if (shapeCompliant || sentinelConfirmed) {
-      // 2026-08-10 (user rule): the status line / sentinel IS the completion
-      // contract — when present, the reply is DONE regardless of confidence or
-      // poll.state (which may be idle due to broken state detection). This is
-      // the PRIMARY path: no stability window, no hash wait. (The sentinel was
-      // already stripped above; sentinelConfirmed is set when it was found.)
+    if (tokenPresent) {
       complete = true;
     } else if (confidence === 'authoritative') {
-      // sentinel presence is DEFINITIVE (model wrote it last per instruction) —
-      // no hash confirmation needed. NATIVE markers (grok "Worked for Xs",
-      // perplexity follow-up) keep hash confirmation AND require a prior poll
+      // NON-marker native markers (grok "Worked for Xs", perplexity
+      // follow-up) keep hash confirmation AND require a prior poll
       // (prevHash !== null): grok renders the timing line at the START of the
       // message while the answer streams below, so a marker on the first poll
-      // must NOT complete mid-stream (2026-08-10 live bug — it let the reminder
-      // fire and interrupt grok). Only sentinelConfirmed bypasses cold-start.
-      complete = sentinelConfirmed || (p.prevHash !== null && hash === p.prevHash);
+      // must NOT complete mid-stream (2026-08-10 live bug).
+      complete = p.prevHash !== null && hash === p.prevHash;
     } else {
-      const windowMs = windowForPoll(poll);
-      const stability = completionStability(hash, p.prevHash, p.stableSince, Date.now(), windowMs);
-      p.stableSince = stability.stableSince;
-      complete = stability.complete;
+      // completionMarker ask with NO trailing token yet: wait for COMPLETION —
+      // the DRIVER's verdict (state completed) hash-confirmed against the
+      // prior poll (settle check, no stability window).
+      complete = poll.state === 'completed'
+        && p.prevHash !== null && hash === p.prevHash;
+    }
+    // 2026-08-10 (user rule): the reminder fires when the ask completed (driver
+    // verdict) but the model's reply lacks the trailing 10-char token — it
+    // skipped the completion signal. ONE bounded reminder using the
+    // user-validated soft phrasing.
+    if (complete && !tokenPresent && !p.reminderSent && p.sendVerified) {
+      p.reminderSent = true;
+      p.preReminderResponse = poll.response;
+      recordSendEvent({ ...envelope, content: p.prompt }, 'send.queued');
+      await driver.ask(session, statusLineReminder('', driver.provider));
+      return {
+        completed: false, response: '', markdown: null, steps: p.stepsCollected,
+        currentStep: '', status: 'reminder_sent',
+        agentBrowsingUrl: '', timedOut: false,
+        correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
+      };
     }
     if (complete) {
       // 2026-08-10 (user rule): for completionMarker asks the code is the
@@ -1195,9 +1307,25 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
       // fallback after one reminder) — no separate compliance loop needed.
       pendingAsks.delete(key);
       const wasLate = p.phase === 'watching';
+      // 2026-08-10 (reminder turn leak, live test): after a reminder the model
+      // replies with ONLY the status line, and the driver's current-turn
+      // scoping (last prose element) reads that bare line as the answer — the
+      // real answer (preReminderResponse) would be lost. Stitch: if the final
+      // response is just a status line (no substantive answer text), prepend
+      // the pre-reminder answer so the delivered response is answer + line.
+      let finalResponse: string;
+      if (p.reminderSent && p.preReminderResponse
+        && isBareStatusLine(poll.response) && !poll.response.includes(p.preReminderResponse)) {
+        const stitched = `${p.preReminderResponse.trimEnd()}\n\n${lastStatusLine(poll.response)}`;
+        // 2026-08-10 (ADR 0012): the line carries the MODEL's own code (we
+        // don't control it) — preserved as provenance; nothing to strip
+        finalResponse = stitched;
+      } else {
+        finalResponse = poll.response;
+      }
       const outcome: AskOutcome = {
         completed: true,
-        response: poll.response || 'Task completed (no response text extracted)',
+        response: finalResponse || 'Task completed (no response text extracted)',
         markdown: poll.markdown ?? null,
         steps: p.stepsCollected,
         currentStep: poll.currentStep,
@@ -1209,33 +1337,37 @@ export async function advanceAsk(key: string): Promise<AskOutcome | null> {
         correlationId: envelope.correlationId,
         idempotencyKey: envelope.idempotencyKey,
       };
+      // 2026-08-10: when the reminder turn was stitched into the answer, the
+      // durable contentHash must match the STORED text (hash-binding invariants:
+      // relay prepare hashes the exact envelope content, dedup keys on the hash).
+      const recordHash = finalResponse !== poll.response ? simpleHash(outcome.response) : hash;
       // durable: response.received (+ cursor checkpoint) → delivery.receipt
       // completed (normal) or completed_late (recovered after soft expiry).
       // ADR 0009 follow-up: if this content is a same-prefix GROWTH of an already
       // recorded terminal response (early authoritative finalize, content kept
       // streaming), record response.amended instead of a second response.received.
-      const alreadyRecorded = hasResponseHash(envelope.correlationId, hash);
+      const alreadyRecorded = hasResponseHash(envelope.correlationId, recordHash);
       const amended = !alreadyRecorded
         ? recordResponseAmended({ ...envelope, content: p.prompt }, driver.provider, {
-            messageId: poll.messageId, contentHash: hash, cursor: poll.cursor ?? hash,
+            messageId: poll.messageId, contentHash: recordHash, cursor: poll.cursor ?? recordHash,
             state: poll.state, text: outcome.response, steps: p.stepsCollected,
           })
         : null;
       const responseEv = amended
         ?? (alreadyRecorded
           ? recordResponseDeduplicated({ ...envelope, content: p.prompt }, driver.provider, {
-              messageId: poll.messageId, contentHash: hash, cursor: poll.cursor ?? hash,
+              messageId: poll.messageId, contentHash: recordHash, cursor: poll.cursor ?? recordHash,
               state: poll.state, text: outcome.response, steps: p.stepsCollected,
             })
           : recordResponseReceived({ ...envelope, content: p.prompt }, driver.provider, {
-              messageId: poll.messageId, contentHash: hash, cursor: poll.cursor ?? hash,
+              messageId: poll.messageId, contentHash: recordHash, cursor: poll.cursor ?? recordHash,
               state: poll.state, text: outcome.response, steps: p.stepsCollected,
             }, targetId));
       recordDeliveryReceipt({
         receiptId: `rct-${responseEv.seq}`, envelopeId: envelope.idempotencyKey,
         correlationId: envelope.correlationId, idempotencyKey: envelope.idempotencyKey,
         status: wasLate ? 'completed_late' : 'completed', recordedAt: new Date().toISOString(), attempt: 1,
-        contentHash: hash, providerMessageId: poll.messageId, cursor: poll.cursor ?? hash,
+        contentHash: recordHash, providerMessageId: poll.messageId, cursor: poll.cursor ?? recordHash,
         details: alreadyRecorded ? 'reconnect-dedup: content already recorded for this correlation' : (wasLate ? 'recovered after soft expiry' : undefined),
       });
       return alreadyRecorded ? { ...outcome, deduped: true } : outcome;

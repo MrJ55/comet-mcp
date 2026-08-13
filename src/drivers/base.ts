@@ -31,6 +31,7 @@ import type { DeliveryReceipt, ProviderId } from '../types/conversation.js';
 import { loadEntry, resolveWithConfidence, recordSuccess, recordFailure, writeEntry } from '../core/registry.js';
 import { resolveWithRebind } from '../core/fingerprint.js';
 import { extractAssistantTurn, ASSISTANT_TURN_STRIPS } from '../providers/extraction.js';
+import { detectCompletion } from '../providers/completion.js';
 import { htmlToMarkdown } from '../providers/markdown.js';
 
 /** FNV-1a 32-bit content hash (same as the P1/P2 drivers' local copies). */
@@ -267,8 +268,17 @@ export abstract class BaseChatDriver implements ChatDriver {
       return r?.success === true;
     }
 
-    // insertText (contenteditable/Quill/ProseMirror) — and key-events escape hatch:
-    // same path plus a real InputEvent, for providers that intercept execCommand.
+    // insertText (contenteditable/Quill/ProseMirror) — plus the mandatory real
+    // InputEvent: execCommand('insertText') sets the DOM but does NOT fire the
+    // app's change detection (React/Angular/Quill), so the send button stays
+    // disabled and the prompt never submits. The perplexity submission fix
+    // (0cc93db, 2026-08-10) dispatched a real InputEvent unconditionally —
+    // propagated here so EVERY entry-driven driver (gemini/chatgpt/claude)
+    // follows the SAME proven pattern (user rule: one pattern, all drivers).
+    // 2026-08-13 (perplexity live-verified): the InputEvent MUST NOT carry
+    // `data` — with data the editor ALSO inserts the text on top of
+    // execCommand's copy, doubling the prompt. Data-less input event only
+    // triggers change detection (value read from the DOM = 1 copy).
     const r = await this.evalValue(handle, `(() => {
       const el = document.querySelector(${JSON.stringify(composer)});
       if (!el) return { success: false };
@@ -276,9 +286,7 @@ export abstract class BaseChatDriver implements ChatDriver {
       editable.focus();
       document.execCommand('selectAll', false, null);
       const ok = document.execCommand('insertText', false, ${JSON.stringify(prompt)});
-      ${mode === 'key-events'
-        ? `editable.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(prompt)} }));`
-        : ''}
+      editable.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
       return { success: ok !== false };
     })()`);
     return r?.success === true;
@@ -409,9 +417,11 @@ export abstract class BaseChatDriver implements ChatDriver {
    * response text; an empty container after generation degrades instead of
    * reporting a silent empty response.
    *
-   * 2026-08-09 latency fix: returns confidence too — stop-absent on providers
-   * WITH a real stop button ⇒ 'heuristic' (short window); response-present with
-   * no stop control at all ⇒ 'weak' (full 8s window).
+   * 2026-08-10 (user rule): the COMPLETION verdict (state/confidence/via) comes
+   * from the ONE shared detector (src/providers/completion.ts) — same for all
+   * drivers, parameterized by provider. This method keeps only the
+   * provider-entry-state checks (login/blocked/degraded — availability, not
+   * completion) and delegates the rest.
    */
   protected determineState(driver: ProviderDriver | null, probe: PollProbe): { state: ProviderState; completionConfidence?: 'heuristic' | 'weak' } {
     const body = (probe.bodyText ?? '').toLowerCase();
@@ -420,18 +430,17 @@ export abstract class BaseChatDriver implements ChatDriver {
     if (login.some((p) => body.includes(p.toLowerCase()))) return { state: 'login_required' };
     if (blocked.some((p) => body.includes(p.toLowerCase()))) return { state: 'blocked' };
 
-    const working = probe.hasStopButton === true;
-    if (working) return { state: 'streaming' };
-
-    // working signal absent — generation either finished or failed
-    if ((probe.texts?.length ?? 0) > 0) {
-      // a stop/working control EXISTS on this provider entry (base P6:
-      // gemini/chatgpt/claude all define signals.working) and is now absent →
-      // heuristic (short window). No working signal defined at all → weak.
-      const hasWorkingSignal = !!driver?.signals?.working;
-      return hasWorkingSignal
-        ? { state: 'completed', completionConfidence: 'heuristic' }
-        : { state: 'completed', completionConfidence: 'weak' };
+    const verdict = detectCompletion({
+      provider: this.provider as any,
+      currentTurnText: probe.texts?.[probe.texts.length - 1] ?? '',
+      bodyText: probe.bodyText ?? '',
+      hasActiveStopButton: probe.hasStopButton === true,
+      hasLoadingSpinner: false,
+      hasWorkingSignal: !!driver?.signals?.working,
+    });
+    if (verdict.state === 'working') return { state: 'streaming' };
+    if (verdict.state === 'completed') {
+      return { state: 'completed', completionConfidence: (verdict.completionConfidence ?? 'weak') as 'heuristic' | 'weak' };
     }
     if (ERROR_PATTERNS.some((p) => body.includes(p))) return { state: 'degraded' };
     // response container exists but is empty (or missing after a completed ask) —
@@ -468,6 +477,11 @@ export abstract class BaseChatDriver implements ChatDriver {
     const markdown = state === 'completed' && (probe.htmls?.length ?? 0) > 0
       ? htmlToMarkdown(this.markdownVariant(), probe.htmls![probe.htmls!.length - 1])
       : null;
+    // 2026-08-10 (user rule): completionVia comes from the ONE shared detector
+    // (via determineState → detectCompletion): 'sentinel' when the status line /
+    // sentinel contract was observed in the current turn, 'fallback' otherwise.
+    // The gate's bounded reminder fires on 'fallback'.
+    const completionVia = this.completionViaFor(driver, probe);
 
     return {
       state,
@@ -481,6 +495,9 @@ export abstract class BaseChatDriver implements ChatDriver {
       contentHash: extraction ? simpleHash(extraction.response) : undefined,
       // 2026-08-09 latency fix: stop-absent on providers with a working signal ⇒ heuristic
       completionConfidence: decided.completionConfidence,
+      // 2026-08-10 (user rule, same pattern as every driver): the shared
+      // detector's completionVia — sentinel vs fallback
+      completionVia,
       extraction: extraction
         ? {
             joinedProseBlocks: extraction.joinedProseBlocks,
@@ -489,6 +506,23 @@ export abstract class BaseChatDriver implements ChatDriver {
           }
         : undefined,
     };
+  }
+
+  /**
+   * 2026-08-10 (user rule): completionVia from the ONE shared detector —
+   * 'sentinel' when the status line / sentinel contract was observed in the
+   * current turn (the completionMarker triggered), 'fallback' otherwise.
+   * The gate's bounded reminder fires on 'fallback' for a completionMarker ask.
+   */
+  protected completionViaFor(driver: ProviderDriver | null, probe: PollProbe): 'sentinel' | 'fallback' {
+    return detectCompletion({
+      provider: this.provider as any,
+      currentTurnText: probe.texts?.[probe.texts.length - 1] ?? '',
+      bodyText: probe.bodyText ?? '',
+      hasActiveStopButton: probe.hasStopButton === true,
+      hasLoadingSpinner: false,
+      hasWorkingSignal: !!driver?.signals?.working,
+    }).completionVia;
   }
 
   /** Agent-browsing URL with sibling-provider-tab exclusion (P3 fix, shared). */
@@ -514,10 +548,13 @@ export abstract class BaseChatDriver implements ChatDriver {
     const handle = this.handleFor(session);
     const driver = this.driverSection();
     const method = driver?.reset?.method;
+    // 2026-08-10 (ADR 0012): a fresh session starts at the URL the user opened
+    // this tab at (project/Gem with the status-line Custom Instruction — read
+    // live at session open), falling back to the entry reset URL.
+    const targetUrl = session.sessionUrl ?? driver?.reset?.url;
     if (method === 'navigate') {
-      const url = driver?.reset?.url;
-      if (url) {
-        await handle.navigate(url, true);
+      if (targetUrl) {
+        await handle.navigate(targetUrl, true);
         await new Promise((r) => setTimeout(r, 1500));
         return;
       }
@@ -535,7 +572,13 @@ export abstract class BaseChatDriver implements ChatDriver {
         }
       }
     }
-    // default / 'url': scoped registry reset (navigates to the entry URL)
+    // default / 'url': scoped registry reset (navigates to the session URL when
+    // set — the project/Gem with the Custom Instruction — else the entry URL)
+    if (targetUrl) {
+      await handle.navigate(targetUrl, true);
+      await new Promise((r) => setTimeout(r, 1500));
+      return;
+    }
     await tabRegistry.reset(session.targetId);
   }
 
