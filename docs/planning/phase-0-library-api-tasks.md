@@ -27,6 +27,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Broad new tool-calling / MCP-Bridge work
 - [ ] Changing P4 relay safety semantics
 - [ ] General-purpose admission queueing for busy tabs
+- [ ] Distributed lease systems (Redis, etcd, etc.) — single-process ownership only
 
 ## Definition of Done (Phase 0 exit)
 
@@ -62,7 +63,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
   - `engine.close()` graceful shutdown
   - Facade ops take `engine` (or are methods on it); no implicit duplicate runtime on random API calls
 - [ ] Define one advancer instance per engine runtime; importing the library alone must not start MCP stdio or an advancer
-- [ ] Define graceful shutdown: finish in-flight work or release its lease cleanly; no orphaned timers/workers
+- [ ] Define graceful shutdown: finish in-flight work or release ownership cleanly; no orphaned timers/workers
 - [ ] Document whether unfinished asks are reconstructed from existing durable state after restart; do not invent a second durable queue
 - [ ] Add a short ADR/note if the runtime boundary is not already explicit
 
@@ -102,7 +103,12 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] `dispatchAsk({ provider, tabId?, prompt, idempotencyKey, … })` → `{ correlationId, idempotencyKey, status }`
 - [ ] `getAsk(correlationId | idempotencyKey)` → snapshot including status, tabId, timestamps, responseId?
 - [ ] `advanceAsk(id)` — **internal/test-only**; production consumers must not need to call it
-- [ ] `getResponse(responseId | askId, cursor?)` → text/chunks; if both identities are accepted, document unambiguous resolution
+- [ ] **Response lookup preference (consumer-facing):**
+  - Canonical consumer path: `dispatchAsk` → `askId`/`correlationId` → `getAsk(askId)` → (optional `responseId` on snapshot) → `getResponse(askId)`
+  - Prefer **`askId` as the primary consumer-facing argument** to `getResponse`; the engine may resolve `askId` → `responseId` internally
+  - If the existing engine naturally supports `getResponse(responseId)` as well, keep it, but document unambiguous resolution and treat `askId` as the facade-preferred form
+  - Do not block Phase 0 on perfect identity unification; expose what the engine already supports, then let the comet-api adapter canonicalize for HTTP clients
+  - Optional `cursor?` for chunked reads remains allowed
 - [ ] `stopAsk(id)` or document unsupported
 
 ### B4. Model/tab helpers (for comet-api)
@@ -120,7 +126,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
   2. `openTab` / `resolveTab` (documented policy; no silent wrong tab)
   3. `dispatchAsk` with `idempotencyKey`
   4. Rely on advancer; optionally poll `getAsk` until terminal
-  5. `getResponse`
+  5. `getResponse(askId)` (engine may resolve ask → response internally)
   6. `engine.close()` on process exit
 - [ ] Multi-turn Phase 0 model: same tab + new prompt + distinct `idempotencyKey` (state this in the runbook)
 
@@ -132,31 +138,35 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 ### C1. Design
 - [ ] Single module e.g. `src/engine/advancer.ts` or beside PendingAsk registry
-- [ ] Loop: select due asks → claim lease/ownership → `advanceAsk` → persist → reschedule or complete
+- [ ] Loop: select due asks → claim ownership → `advanceAsk` → persist → reschedule or complete
 - [ ] The advancer must use the **existing ask lifecycle state** as its source of truth; do not create a second durable queue/state machine
-- [ ] One owner per ask (lease/mutex); no double advance
+- [ ] **Ownership invariant only:** one ask → at most one active advancement at a time
+  - A **process-local mutex / in-memory claim** is sufficient for the current single-process engine
+  - Do **not** invent Redis-style distributed leases, TTLs, or fencing tokens merely because the word “lease” appears in older notes
+  - Use the simplest ownership mechanism compatible with the existing durable event/recovery model
+  - If a claim has a timeout, keep it a local safety net against a stuck worker in *this* process — not distributed-systems machinery
 - [ ] Global + per-provider concurrency limits (respect pool cap ~5)
 - [ ] Use existing per-tab backoff/circuit breaker; do not bypass; no busy-loop spin on `next due`
 - [ ] On soft-expiry/`watching`, hand off to existing reaper — do not invent second reaper
 - [ ] Stop advancing on terminal states
-- [ ] Document the source of `next due` timing, wake-up mechanism, lease ownership/TTL, and restart behavior
+- [ ] Document the source of `next due` timing, wake-up mechanism, process-local ownership, and restart behavior
 
 ### C2. Lifecycle integration
 - [ ] Start/stop advancer from the explicit engine runtime lifecycle
 - [ ] Ensure exactly one advancer per engine runtime
-- [ ] Graceful stop: finish in-flight lease or release cleanly
+- [ ] Graceful stop: finish in-flight advancement or release ownership cleanly
 - [ ] Ensure completion still writes event-store + response store before clearing PendingAsk
 - [ ] On restart, reconcile/recover only through existing durable state; do not manufacture duplicate asks/sends
 
 ### C3. Tests
-- [ ] Unit: lease prevents concurrent advance
+- [ ] Unit: ownership/claim prevents concurrent advance of the same ask
 - [ ] Unit: terminal status removes ask from active scheduling
 - [ ] Unit: watching does not count as usable completion
 - [ ] Unit: shutdown does not leave an active advancer/timer behind
 - [ ] Integration/smoke: dispatch without manual advance reaches completed (mock driver if needed)
 - [ ] Integration/recovery: unfinished ask after restart follows the documented recovery path where practical
 
-**Acceptance:** After `dispatchAsk`, with no `provider_poll` or external `advanceAsk`, ask reaches `completed` or documented terminal failure; response fetchable.
+**Acceptance:** After `dispatchAsk`, with no `provider_poll` or external `advanceAsk`, ask reaches `completed` or documented terminal failure; response fetchable via `getResponse(askId)` (or documented equivalent).
 
 ---
 
@@ -179,7 +189,8 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Ensure retry while original ask is in progress returns the existing ask rather than creating a second PendingAsk
 
 ### D3. Response path
-- [ ] getResponse fails clearly if not complete
+- [ ] `getResponse(askId)` (preferred) fails clearly if not complete; engine may resolve ask → response internally
+- [ ] If `responseId` is also accepted, document resolution rules; comet-api adapter may canonicalize to askId later
 - [ ] Strip sentinel/status-line from user-visible content if engine already does — do not regress
 - [ ] Multi-turn: follow-up must not return previous turn hash (regression coverage)
 
@@ -198,7 +209,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
   - health/open as needed
   - dispatchAsk unique idempotencyKey
   - wait on getAsk until terminal (timeout generous)
-  - getResponse non-empty
+  - getResponse non-empty (prefer by askId)
   - second dispatchAsk same key → replayed, no duplicate send
 - [ ] Print per-provider latency and status
 - [ ] Exit non-zero on failure
@@ -222,7 +233,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 ### F2. Consumer contract snippet
 - [ ] Add `docs/runbooks/engine-library.md` with copy-paste example matching what comet-api `src/clients/comet-engine.ts` will call
-- [ ] Include explicit engine handle lifecycle and multi-turn (same-tab) note
+- [ ] Include explicit engine handle lifecycle, preferred `getResponse(askId)` path, and multi-turn (same-tab) note
 
 ### F3. Notify facade repo (human or follow-up commit in comet-api)
 - [ ] comet-api `planning/progress.md`: Phase 0 unlocked + commit SHA of engine
@@ -257,6 +268,8 @@ Do not combine PR-3 and PR-5 in one change if unstable.
 8. When unsure, extend existing modules rather than new frameworks.
 9. Do not silently introduce busy-tab admission queues, alternate completion semantics, or new lifecycle authorities.
 10. Status strings and `usable()` must come from the shared enum/helper — do not hard-code ad-hoc status literals in new modules.
+11. **Ownership is process-local:** do not build distributed leases (Redis/etcd/fencing). Required invariant is only “one ask → at most one active advancement.” A local mutex/claim is enough.
+12. Prefer **`getResponse(askId)`** for consumers; internal ask→response resolution is fine. Do not over-engineer identity unification in Phase 0.
 
 ---
 
@@ -273,3 +286,4 @@ Do not combine PR-3 and PR-5 in one change if unstable.
 | Sync wait / async pull | C + D (engine completes; HTTP later) |
 | 5 models in /v1/models | Workstream E |
 | Error / 409 mapping | B4, D2 |
+| Canonical askId response fetch | B3, D3 |
