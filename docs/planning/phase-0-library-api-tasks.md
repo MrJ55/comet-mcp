@@ -5,6 +5,9 @@
 **Worker profile:** code agent (e.g. DeepSeek V4 Flash) — prefer small PRs, one subsection at a time  
 **Goal:** Non-MCP callers can `dispatchAsk` → engine-owned advancement → `getResponse` on all five providers without client `provider_poll`.
 
+**Companion:** [`phase-0-library-api-tasks-addendum.md`](./phase-0-library-api-tasks-addendum.md) — PR acceptance staging, hard vs full DoD, process ownership, comet-api handoff.  
+**Precedence:** this file wins on product contracts (`askId`, status, idempotency, extraction); the addendum wins on PR gates, process ownership, DoD tiers, and handoff steps. See also [`README.md`](./README.md).
+
 ## Architectural boundary
 
 Phase 0 makes the existing comet-mcp engine consumable as a library. It does **not** create a second engine, scheduler, completion detector, event store, reaper, or relay implementation.
@@ -17,7 +20,9 @@ The runtime must have an explicit lifecycle boundary (preferred: `createEngine()
 
 **Preferred handle model:** facade operations take an explicit `engine` handle (or are methods on it). Avoid a process-global singleton for production paths so tests and multi-instance use stay safe. Document any temporary singleton only if required by existing MCP wiring.
 
-The advancer is a driver of the existing ask lifecycle, not a second lifecycle authority. Existing PendingAsk, event-store, response-store, completion detection, soft-expiry/reaper, tab registry, and relay safety semantics remain authoritative.
+**Repeated `createEngine`:** Prefer failing a second create in-process with `ENGINE_ALREADY_OWNED` (or equivalent) until `close()`; alternatively return the same handle only if existing MCP wiring requires it. Details: addendum §2.
+
+The advancer is a driver of the existing ask lifecycle, not a second lifecycle authority. Existing PendingAsk, event-store, response-store, completion detection, soft-expiry/reaper, tab registry, and relay safety semantics remain authoritative. Soft-expiry/reaper: **start or attach only** — do not reimplement.
 
 **Public ask identity:** Prefer one public name in the library facade — **`askId`** (treat existing `correlationId` as an alias of the same value if both appear in code today). Document the chosen name and any alias in the lifecycle note so comet-api does not invent a third identifier.
 
@@ -35,8 +40,17 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 ## Definition of Done (Phase 0 exit)
 
+Phase 0 uses **two DoD tiers** (full detail in the addendum §4):
+
+| Tier | Purpose |
+|---|---|
+| **Hard facade-unlock DoD** | Unblocks comet-api. Engine library + advancer + contracts + runbook; ≥1 live provider (prefer Perplexity) **or** mock/fixture + explicit live waiver. |
+| **Full Phase 0 provider badge** | Release-quality target. All five providers live/scripted or documented waiver per provider. Does **not** block starting comet-api against a hard-DoD SHA. |
+
+### Hard facade-unlock checklist
+
 - [ ] Documented library entrypoint importable without starting MCP stdio
-- [ ] Explicit engine runtime startup/shutdown owns exactly one internal advancer
+- [ ] Explicit engine runtime startup/shutdown owns exactly one internal advancer; reaper start/attach only
 - [ ] **Facade/extraction invariant verified** (not prose-only). Minimum verification:
   - Symbol map marks each new Phase-0 module as *wrap/delegate* vs *new behavior*
   - Library path and MCP path invoke the same underlying ask lifecycle, completion/persistence components, and authoritative state (e.g. shared module imports / same registry or event-store entry in a unit or smoke test)
@@ -49,10 +63,16 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Same `idempotencyKey` + different request identity returns `IDEMPOTENCY_CONFLICT`
 - [ ] Idempotency fingerprint field list recorded from existing dispatch payload (before or with D2 implementation)
 - [ ] Restart/reinitialization behavior for unfinished asks is documented and tested where practical
-- [ ] **Default CI gate is scripted/mock**; live five-provider gate is env-gated or manual (or explicit waiver with issue link)
+- [ ] **Default CI gate is scripted/mock**; at least one live provider gate preferred, or explicit waiver with issue link
 - [ ] `docs/build-plan.md` notes P5b/P7 deferred; facade Phase 0 unlocked
 - [ ] Unit tests still green; add tests for new modules
 - [ ] Short runbook: how comet-api (or a script) should call the library
+
+### Full provider badge (quality target; not a hard gate for comet-api)
+
+- [ ] Live or scripted evidence for perplexity, grok, gemini, chatgpt, claude (or waiver + issue per provider)
+- [ ] Multi-turn follow-up for Perplexity + one other
+- [ ] Latency/status/replay recorded per provider
 
 ---
 
@@ -76,9 +96,11 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Identify the object/module that owns engine startup and shutdown
 - [ ] Prefer concrete API shape:
   - `createEngine(opts?)` → `Engine` handle
-  - `engine.close()` graceful shutdown
+  - `engine.close()` graceful shutdown (idempotent)
   - Facade ops take `engine` (or are methods on it); no implicit duplicate runtime on random API calls
+- [ ] **Second `createEngine` in-process:** prefer `ENGINE_ALREADY_OWNED` (or equivalent) until `close()`; same-handle return only if MCP wiring requires it (addendum §2)
 - [ ] Define one advancer instance per engine runtime; importing the library alone must not start MCP stdio or an advancer
+- [ ] Soft-expiry/reaper: start or attach to the **existing** authoritative machinery only — do not reimplement
 - [ ] Define graceful shutdown: finish in-flight work or release ownership cleanly; no orphaned timers/workers
 - [ ] Document whether unfinished asks are reconstructed from existing durable state after restart; do not invent a second durable queue
 - [ ] Add a short ADR/note if the runtime boundary is not already explicit
@@ -131,7 +153,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] `resolveTab({ provider, tabId? })` — **no silent wrong-tab default**; if tabId omitted, document policy
 - [ ] For Phase 0/Phase 1 facade, prefer explicit `TAB_BUSY` / 409 semantics over introducing an admission queue; queueing is deferred
 - [ ] `assertTabIdle(tabId)` or occupied-tab detection for one-active-ask-per-tab
-- [ ] Return stable codes: `TAB_BUSY`, `TAB_NOT_FOUND`, `TAB_CAP_EXCEEDED`, `PROVIDER_UNAVAILABLE`, `IDEMPOTENCY_CONFLICT`
+- [ ] Return stable codes: `TAB_BUSY`, `TAB_NOT_FOUND`, `TAB_CAP_EXCEEDED`, `PROVIDER_UNAVAILABLE`, `IDEMPOTENCY_CONFLICT`, `ENGINE_ALREADY_OWNED`
 - [ ] Prefer one minimal error shape for library consumers: `{ code: string, message: string, details?: unknown }` — no large hierarchy in Phase 0
 
 ### B5. Package + docs for consumers
@@ -147,7 +169,11 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Multi-turn Phase 0 model: same tab + new prompt + distinct `idempotencyKey` (state this in the runbook)
 - [ ] Document public `askId` naming (and any `correlationId` alias) in the runbook
 
-**Acceptance:** From repo root, a script imports library, opens/lists, dispatches, and (with advancer) completes without MCP.
+**Acceptance (staged — see addendum §1):**
+
+- **PR-2:** Script imports library, creates engine, opens/lists, dispatches, reads snapshot (manual/`advanceAsk` test path allowed). **Do not** claim poll-free auto-completion in PR-2.
+- **PR-3+:** Same script (or successor) completes without client `provider_poll` or external `advanceAsk` once the internal advancer exists.
+- Full B5 auto-complete smoke is an **advancer** acceptance, not an exports-only acceptance.
 
 ---
 
@@ -164,7 +190,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
   - If a claim has a timeout, keep it a local safety net against a stuck worker in *this* process — not distributed-systems machinery
 - [ ] Global + per-provider concurrency limits (respect pool cap ~5)
 - [ ] Use existing per-tab backoff/circuit breaker; do not bypass; no busy-loop spin on `next due`
-- [ ] On soft-expiry/`watching`, hand off to existing reaper — do not invent second reaper
+- [ ] On soft-expiry/`watching`, hand off to existing reaper — do not invent second reaper; **start/attach only**
 - [ ] Stop advancing on terminal states
 - [ ] Document the source of `next due` timing, wake-up mechanism, process-local ownership, and restart behavior
 
@@ -184,7 +210,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Integration/recovery: unfinished ask after restart follows the documented recovery path where practical
 - [ ] Extraction check: library dispatch and MCP path share the same authoritative lifecycle components (no duplicate registries/stores)
 
-**Acceptance:** After `dispatchAsk`, with no `provider_poll` or external `advanceAsk`, ask reaches `completed` or documented terminal failure; response fetchable via `getResponse(askId)` (or documented equivalent).
+**Acceptance:** After `dispatchAsk`, with no `provider_poll` or external `advanceAsk`, ask reaches `completed` or documented terminal failure; response fetchable via `getResponse(askId)` (or documented equivalent). **First PR that may claim this: PR-3.**
 
 ---
 
@@ -240,37 +266,39 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Paste summary into PR or `docs/planning/phase-0-live-gate-results.md`
 - [ ] Known environmental blockers (rate limit, login) documented — not silent skip
 - [ ] If live gate cannot run: ship library+advancer+unit/scripted tests and link a waiver issue
+- [ ] Hard DoD may pass with mock/fixture + ≥0–1 live provider + waiver; full badge needs all five or per-provider waivers
 
 ---
 
 ## Workstream F — Close the loop for comet-api
 
 ### F1. Build-plan / design notes
-- [ ] Update `docs/build-plan.md`: Phase 0 facade-unlock done; P5a public `wait_any` deferred; P5b/P7 deferred
-- [ ] Optional one-line pointer in `docs/design/README.md` to this task list
+- [ ] Update `docs/build-plan.md`: Phase 0 facade-unlock done (hard DoD); P5a public `wait_any` deferred; P5b/P7 deferred; note full provider badge status if incomplete
+- [ ] Optional one-line pointer in `docs/design/README.md` to this task list and the addendum
 
 ### F2. Consumer contract snippet
 - [ ] Add `docs/runbooks/engine-library.md` with copy-paste example matching what comet-api `src/clients/comet-engine.ts` will call
 - [ ] Include explicit engine handle lifecycle, public `askId` naming, preferred `getResponse(askId)` path, and multi-turn (same-tab) note
 
-### F3. Notify facade repo (human or follow-up commit in comet-api)
-- [ ] comet-api `planning/progress.md`: Phase 0 unlocked + commit SHA of engine
-- [ ] comet-api can set dependency `file:../comet-mcp` or git SHA pin
+### F3. Notify facade repo (see addendum §6 for full steps)
+- [ ] comet-api `planning/progress.md`: Phase 0 hard unlock + engine commit SHA + hard vs full badge status
+- [ ] comet-api dependency: `file:../comet-mcp` or git SHA pin
+- [ ] `comet-engine.ts` uses only documented library exports (no drivers/CDP/event-store internals)
 
 ---
 
 ## Suggested PR slices (for a small model worker)
 
-| PR | Scope |
-|---|---|
-| PR-1 | A1–A3 docs only: symbol map (**authoritative component per responsibility**, **wrap-vs-new**, **askId naming**, **draft fingerprint fields**) + runtime-boundary note + lifecycle/status table |
-| PR-2 | B1–B3 library exports + explicit engine lifecycle (`createEngine`/`close`; stub advancer OK) |
-| PR-3 | C1–C3 internal advancer + tests + recovery behavior + extraction check |
-| PR-4 | B4–B5 + D1–D4 snapshot/idempotency polish |
-| PR-5 | E1–E3 scripted default gate + optional live results |
-| PR-6 | F1–F2 build-plan + runbook |
+| PR | Scope | May claim |
+|---|---|---|
+| PR-1 | A1–A3 docs only: symbol map (**authoritative component per responsibility**, **wrap-vs-new**, **askId naming**, **draft fingerprint fields**) + runtime-boundary note + lifecycle/status table | Docs only |
+| PR-2 | B1–B3 library exports + explicit engine lifecycle (`createEngine`/`close`; stub advancer OK) | Import, dispatch, snapshot; **not** poll-free complete |
+| PR-3 | C1–C3 internal advancer + tests + recovery behavior + extraction check | **First** poll-free auto-complete |
+| PR-4 | B4–B5 + D1–D4 snapshot/idempotency polish | Full consumer smoke if PR-3 present |
+| PR-5 | E1–E3 scripted default gate + optional live results | Provider evidence / badge progress |
+| PR-6 | F1–F3 build-plan + runbook + comet-api handoff | Hard DoD closeout |
 
-Do not combine PR-3 and PR-5 in one change if unstable.
+Do not combine PR-3 and PR-5 in one change if unstable. Detailed boundaries: addendum §1.
 
 ---
 
@@ -291,6 +319,8 @@ Do not combine PR-3 and PR-5 in one change if unstable.
 13. **Extraction invariant:** Phase 0 is an extraction/facade effort, not a second-engine implementation. Every new runtime component must delegate to, wrap, or clearly complement an existing authoritative component; if a proposed change creates a competing lifecycle state machine, registry, completion detector, durable store, or reaper, stop and resolve the boundary before coding further.
 14. **Verify extraction with evidence:** symbol-map wrap-vs-new rows plus a shared-component check (import identity or shared registry/event entry) — not prose alone.
 15. **One public ask id:** use `askId` in the facade; document `correlationId` only as an alias if the existing engine already uses that name.
+16. **PR staging:** do not claim poll-free completion before PR-3; follow addendum §1.
+17. **Reaper:** start/attach only — never reimplement soft-expiry/reaper in Phase 0.
 
 ---
 
@@ -300,12 +330,14 @@ Do not combine PR-3 and PR-5 in one change if unstable.
 |---|---|
 | Hidden polling | Workstream C |
 | `comet-engine.ts` adapter | Workstream B |
-| Explicit engine lifecycle | A2, B1, C2 |
+| Explicit engine lifecycle | A2, B1, C2; addendum §2 |
 | Status → HTTP map | A3, D1 |
 | Model → tab | Workstream B4 |
 | Idempotency-Key | A1 (draft fields), D2 |
 | Sync wait / async pull | C + D (engine completes; HTTP later) |
-| 5 models in /v1/models | Workstream E |
+| 5 models in /v1/models | Workstream E; full badge in addendum §4 |
 | Error / 409 mapping | B4, D2 |
 | Canonical askId response fetch | B3, D3 |
 | Extraction / no second engine | Architectural boundary, A1, DoD, C3, guardrails 13–14 |
+| Hard unlock vs full badge | DoD tiers; addendum §4 |
+| comet-api handoff | F3; addendum §6 |
