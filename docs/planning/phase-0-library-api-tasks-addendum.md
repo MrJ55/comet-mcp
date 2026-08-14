@@ -6,6 +6,7 @@ This addendum supplements [`phase-0-library-api-tasks.md`](./phase-0-library-api
 
 - **Product contracts** (`askId`, status vocabulary, idempotency fingerprint fields, extraction invariant, error codes, snapshot shape): the **task list** wins.
 - **PR acceptance order, process ownership, hard vs full DoD tiers, handoff steps**: **this addendum** wins.
+- If the documents appear to conflict: this addendum controls **execution semantics**; the task list controls **task scope**.
 - Do not invent a third interpretation when both documents touch the same topic.
 
 ## 1. Acceptance staging by PR
@@ -38,6 +39,18 @@ engine.close()
   → stops new scheduling
   → handles in-flight advancement according to the documented shutdown policy
   → releases process-local ownership/timers cleanly
+```
+
+**Sole lifecycle owner:** `createEngine()` / the engine runtime is the **sole lifecycle owner** of the PendingAsk advancer and the soft-expiry/reconciliation reaper. It may reuse existing reaper implementation code (start or attach), but **no other entrypoint** (MCP tool handlers, library helpers, scripts, or tests outside the runtime) may start a competing advancer or reaper timer.
+
+Invariant:
+
+```text
+one process
+  → one engine runtime
+  → one PendingAsk advancer
+  → one soft-expiry/reconciliation reaper owner
+  → one event-store writer context
 ```
 
 **Repeated `createEngine` (pick and document one; prefer A):**
@@ -123,3 +136,4 @@ For a small code worker:
 - If live browser access is unavailable, complete hard DoD with fixtures/mock and record the blocker; do not fake a provider pass.
 - Stop and ask for review if the change requires a second completion detector, second event store, second reaper, HTTP route, P5b/P7 scheduler, or multi-process ownership scheme.
 - Prefer `createEngine` policy **A** (second create → `ENGINE_ALREADY_OWNED`) unless existing MCP wiring forces policy B.
+- `createEngine` / the engine runtime is the sole starter of advancer and reaper timers; never start a competing timer from another entrypoint.
