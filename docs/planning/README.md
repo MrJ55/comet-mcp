@@ -11,11 +11,14 @@ The HTTP facade and product planning live in **[MrJ55/comet-api](https://github.
 | [phase-0-library-api-tasks.md](./phase-0-library-api-tasks.md) | **Canonical checklist** — library API, internal advancer, lifecycle freeze, extraction invariant, contracts (`askId`, status, idempotency) |
 | [phase-0-library-api-tasks-addendum.md](./phase-0-library-api-tasks-addendum.md) | **Sequencing & runtime gates** — PR acceptance boundaries, hard vs full DoD, process ownership, comet-api handoff |
 
-### Precedence
+## Document precedence
 
-- **Product contracts** (`askId`, status vocabulary, idempotency fingerprint fields, extraction invariant, error codes): the **task list** wins.
-- **PR acceptance order, process ownership, hard vs full DoD tiers, handoff steps**: the **addendum** wins.
-- If both speak to the same topic, follow the more specific rule; do not invent a third interpretation.
+The addendum is **binding execution guidance**, not optional commentary.
+
+- `phase-0-library-api-tasks.md` is the **canonical scope and workstream checklist** (what to build; product contracts such as `askId`, status vocabulary, idempotency fingerprint fields, extraction invariant, error codes).
+- `phase-0-library-api-tasks-addendum.md` is **authoritative for PR sequencing**, runtime ownership, acceptance boundaries, and definition-of-done interpretation (hard unlock vs full provider badge, process rules, handoff).
+- If the documents appear to conflict: the **addendum controls execution semantics**; the **canonical task list controls task scope**.
+- Do not invent a third interpretation.
 
 ## Rules
 
