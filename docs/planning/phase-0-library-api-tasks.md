@@ -19,6 +19,8 @@ The runtime must have an explicit lifecycle boundary (preferred: `createEngine()
 
 The advancer is a driver of the existing ask lifecycle, not a second lifecycle authority. Existing PendingAsk, event-store, response-store, completion detection, soft-expiry/reaper, tab registry, and relay safety semantics remain authoritative.
 
+**Public ask identity:** Prefer one public name in the library facade — **`askId`** (treat existing `correlationId` as an alias of the same value if both appear in code today). Document the chosen name and any alias in the lifecycle note so comet-api does not invent a third identifier.
+
 ## Out of scope (do not do in Phase 0)
 
 - [ ] MCP tool `wait_any` (full P5a public API)
@@ -35,12 +37,17 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 - [ ] Documented library entrypoint importable without starting MCP stdio
 - [ ] Explicit engine runtime startup/shutdown owns exactly one internal advancer
-- [ ] **Facade/extraction invariant verified:** the library path and MCP path invoke the same underlying ask lifecycle, completion/persistence components, and authoritative state; no duplicate engine, PendingAsk registry, completion detector, event store, response store, or reaper is introduced
+- [ ] **Facade/extraction invariant verified** (not prose-only). Minimum verification:
+  - Symbol map marks each new Phase-0 module as *wrap/delegate* vs *new behavior*
+  - Library path and MCP path invoke the same underlying ask lifecycle, completion/persistence components, and authoritative state (e.g. shared module imports / same registry or event-store entry in a unit or smoke test)
+  - No duplicate engine, PendingAsk registry, completion detector, event store, response store, or reaper is introduced
 - [ ] Internal advancer completes asks with **zero** client polls/manual `advanceAsk()` calls
 - [ ] Status vocabulary frozen: markdown table **and** a single exported TypeScript union/enum + pure `usable(status)` used by snapshots and tests
 - [ ] Only `completed` is a successful/usable completion; terminal failure states remain non-usable
+- [ ] Public facade uses a single primary ask identity name (`askId`; `correlationId` only as documented alias if required by existing code)
 - [ ] Idempotent retry: same `idempotencyKey` + same request identity replays the original ask/outcome with no second send
 - [ ] Same `idempotencyKey` + different request identity returns `IDEMPOTENCY_CONFLICT`
+- [ ] Idempotency fingerprint field list recorded from existing dispatch payload (before or with D2 implementation)
 - [ ] Restart/reinitialization behavior for unfinished asks is documented and tested where practical
 - [ ] **Default CI gate is scripted/mock**; live five-provider gate is env-gated or manual (or explicit waiver with issue link)
 - [ ] `docs/build-plan.md` notes P5b/P7 deferred; facade Phase 0 unlocked
@@ -59,7 +66,11 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Locate stop/cancel if any (`provider_stop`)
 - [ ] **For each lifecycle responsibility, identify the existing authoritative component and record it in the symbol map.** At minimum: dispatch, PendingAsk state, completion detection, event persistence, response persistence, tab ownership, soft-expiry/reaper, and relay safety.
 - [ ] **For every new Phase-0 module, record whether it wraps/delegates to an existing component or introduces genuinely new runtime behavior. No new module may become a second authoritative implementation of an existing lifecycle responsibility.**
+- [ ] Record current ask identity symbols (`correlationId`, any `askId`, response ids) and decide the public facade primary name (`askId` preferred; document aliases)
+- [ ] While mapping dispatch payload fields, **draft the idempotency fingerprint field list** (deterministic subset; exclude timestamps / correlation ids) for use in D2 — record it in the symbol map or lifecycle note so D2 does not invent fields later
 - [ ] Write a short symbol map table at the top of a new `docs/planning/phase-0-symbol-map.md` OR in the PR description
+
+**Symbol map must include:** authoritative component per responsibility; wrap-vs-new for any planned Phase-0 module; public `askId` naming decision; draft fingerprint fields.
 
 ### A2. Define engine runtime ownership
 - [ ] Identify the object/module that owns engine startup and shutdown
@@ -105,11 +116,11 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Errors: tab missing, cap exceeded — typed or stable error codes
 
 ### B3. Implement/export ask operations
-- [ ] `dispatchAsk({ provider, tabId?, prompt, idempotencyKey, … })` → `{ correlationId, idempotencyKey, status }`
-- [ ] `getAsk(correlationId | idempotencyKey)` → snapshot including status, tabId, timestamps, responseId?
+- [ ] `dispatchAsk({ provider, tabId?, prompt, idempotencyKey, … })` → `{ askId, idempotencyKey, status }` (use `askId` as the public field; if existing code returns `correlationId`, alias it to the same value and document)
+- [ ] `getAsk(askId | idempotencyKey)` → snapshot including status, tabId, timestamps, responseId?
 - [ ] `advanceAsk(id)` — **internal/test-only**; production consumers must not need to call it
 - [ ] **Response lookup preference (consumer-facing):**
-  - Canonical consumer path: `dispatchAsk` → `askId`/`correlationId` → `getAsk(askId)` → (optional `responseId` on snapshot) → `getResponse(askId)`
+  - Canonical consumer path: `dispatchAsk` → `askId` → `getAsk(askId)` → (optional `responseId` on snapshot) → `getResponse(askId)`
   - Prefer **`askId` as the primary consumer-facing argument** to `getResponse`; the engine may resolve `askId` → `responseId` internally
   - If the existing engine naturally supports `getResponse(responseId)` as well, keep it, but document unambiguous resolution and treat `askId` as the facade-preferred form
   - Do not block Phase 0 on perfect identity unification; expose what the engine already supports, then let the comet-api adapter canonicalize for HTTP clients
@@ -134,6 +145,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
   5. `getResponse(askId)` (engine may resolve ask → response internally)
   6. `engine.close()` on process exit
 - [ ] Multi-turn Phase 0 model: same tab + new prompt + distinct `idempotencyKey` (state this in the runbook)
+- [ ] Document public `askId` naming (and any `correlationId` alias) in the runbook
 
 **Acceptance:** From repo root, a script imports library, opens/lists, dispatches, and (with advancer) completes without MCP.
 
@@ -170,6 +182,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Unit: shutdown does not leave an active advancer/timer behind
 - [ ] Integration/smoke: dispatch without manual advance reaches completed (mock driver if needed)
 - [ ] Integration/recovery: unfinished ask after restart follows the documented recovery path where practical
+- [ ] Extraction check: library dispatch and MCP path share the same authoritative lifecycle components (no duplicate registries/stores)
 
 **Acceptance:** After `dispatchAsk`, with no `provider_poll` or external `advanceAsk`, ask reaches `completed` or documented terminal failure; response fetchable via `getResponse(askId)` (or documented equivalent).
 
@@ -178,19 +191,19 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 ## Workstream D — Lifecycle + response hardening
 
 ### D1. Snapshot contract
-- [ ] `AskSnapshot` fields: ids, provider, tabId, status, usable, error?, responseId?, confidence?, timestamps
+- [ ] `AskSnapshot` fields: askId (and documented aliases), provider, tabId, status, usable, error?, responseId?, confidence?, timestamps
 - [ ] Map confirming vs completed correctly (no false success while stability window holds)
 - [ ] Preserve distinction between terminal and successful/usable
 - [ ] Snapshot status values come from the shared `AskStatus` enum / `usable()` helper
 
 ### D2. Idempotency
-- [ ] Define request identity/fingerprint bound to `idempotencyKey`
+- [ ] Define request identity/fingerprint bound to `idempotencyKey` using the **field list drafted in A1** (refine only if code review finds a missing send-affecting field)
   - Minimal deterministic fields from the dispatch payload (e.g. `provider`, `tabId?`, normalized `prompt` or content hash, plus any model/mode fields that affect the send)
-  - Exclude timestamps, `correlationId`, and other non-identity metadata
-  - Exact field list: derive from existing dispatch payload; document in lifecycle note or runbook
+  - Exclude timestamps, ask/correlation ids, and other non-identity metadata
+  - Record the final field list in the lifecycle note or runbook
 - [ ] Replay same idempotencyKey + same request identity returns prior ask/outcome before send
 - [ ] Same idempotencyKey + different request identity returns `IDEMPOTENCY_CONFLICT`
-- [ ] Test: two dispatchAsk same key → one send.queued/accepted in event log and same correlation identity
+- [ ] Test: two dispatchAsk same key → one send.queued/accepted in event log and same ask identity
 - [ ] Ensure retry while original ask is in progress returns the existing ask rather than creating a second PendingAsk
 
 ### D3. Response path
@@ -238,7 +251,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 ### F2. Consumer contract snippet
 - [ ] Add `docs/runbooks/engine-library.md` with copy-paste example matching what comet-api `src/clients/comet-engine.ts` will call
-- [ ] Include explicit engine handle lifecycle, preferred `getResponse(askId)` path, and multi-turn (same-tab) note
+- [ ] Include explicit engine handle lifecycle, public `askId` naming, preferred `getResponse(askId)` path, and multi-turn (same-tab) note
 
 ### F3. Notify facade repo (human or follow-up commit in comet-api)
 - [ ] comet-api `planning/progress.md`: Phase 0 unlocked + commit SHA of engine
@@ -250,14 +263,16 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 | PR | Scope |
 |---|---|
-| PR-1 | A1–A3 docs only: symbol map + runtime-boundary note + lifecycle table |
+| PR-1 | A1–A3 docs only: symbol map (**authoritative component per responsibility**, **wrap-vs-new**, **askId naming**, **draft fingerprint fields**) + runtime-boundary note + lifecycle/status table |
 | PR-2 | B1–B3 library exports + explicit engine lifecycle (`createEngine`/`close`; stub advancer OK) |
-| PR-3 | C1–C3 internal advancer + tests + recovery behavior |
+| PR-3 | C1–C3 internal advancer + tests + recovery behavior + extraction check |
 | PR-4 | B4–B5 + D1–D4 snapshot/idempotency polish |
 | PR-5 | E1–E3 scripted default gate + optional live results |
 | PR-6 | F1–F2 build-plan + runbook |
 
 Do not combine PR-3 and PR-5 in one change if unstable.
+
+---
 
 ## Worker guardrails (DeepSeek / small agents)
 
@@ -274,6 +289,8 @@ Do not combine PR-3 and PR-5 in one change if unstable.
 11. **Ownership is process-local:** do not build distributed leases (Redis/etcd/fencing). Required invariant is only “one ask → at most one active advancement.” A local mutex/claim is enough.
 12. Prefer **`getResponse(askId)`** for consumers; internal ask→response resolution is fine. Do not over-engineer identity unification in Phase 0.
 13. **Extraction invariant:** Phase 0 is an extraction/facade effort, not a second-engine implementation. Every new runtime component must delegate to, wrap, or clearly complement an existing authoritative component; if a proposed change creates a competing lifecycle state machine, registry, completion detector, durable store, or reaper, stop and resolve the boundary before coding further.
+14. **Verify extraction with evidence:** symbol-map wrap-vs-new rows plus a shared-component check (import identity or shared registry/event entry) — not prose alone.
+15. **One public ask id:** use `askId` in the facade; document `correlationId` only as an alias if the existing engine already uses that name.
 
 ---
 
@@ -286,8 +303,9 @@ Do not combine PR-3 and PR-5 in one change if unstable.
 | Explicit engine lifecycle | A2, B1, C2 |
 | Status → HTTP map | A3, D1 |
 | Model → tab | Workstream B4 |
-| Idempotency-Key | D2 |
+| Idempotency-Key | A1 (draft fields), D2 |
 | Sync wait / async pull | C + D (engine completes; HTTP later) |
 | 5 models in /v1/models | Workstream E |
 | Error / 409 mapping | B4, D2 |
 | Canonical askId response fetch | B3, D3 |
+| Extraction / no second engine | Architectural boundary, A1, DoD, C3, guardrails 13–14 |
