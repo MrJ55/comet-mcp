@@ -8,8 +8,8 @@ The original workstreams remain authoritative. Apply these acceptance boundaries
 
 | PR | Scope | Acceptance boundary |
 |---|---|---|
-| PR-1 | A1–A2 inventory and lifecycle docs | Documentation only; no claim of auto-advancement |
-| PR-2 | B1–B3 library exports | A non-MCP script can import the library, dispatch an ask, receive `in_progress`, and read an ask snapshot. It may use a test/manual advance path. It does **not** claim completion without external advancement. |
+| PR-1 | A1–A3 inventory, runtime-boundary, and lifecycle-freeze docs | Documentation only; no claim of auto-advancement |
+| PR-2 | B1–B3 library exports | A non-MCP script can import the library, dispatch an ask, receive a valid ask snapshot, and read its current state. It may use a test/manual advance path. It does **not** claim completion without external advancement. |
 | PR-3 | C1–C3 internal advancer | After `dispatchAsk`, with no client `provider_poll` or external `advanceAsk`, the ask reaches completed or a documented terminal outcome and the response is fetchable. |
 | PR-4 | B4–B5 + D1–D4 | Stable tab/model errors, consumer smoke script, snapshot, idempotency, response, and abandon-vs-cancel behavior. |
 | PR-5 | E1–E3 live gate | Provider-by-provider live/scripted evidence, latency, replay, follow-up, and failure-path results. |
@@ -19,28 +19,29 @@ Do not mark B5's auto-complete smoke acceptance complete during PR-2. It is an a
 
 ## 2. One runtime owner
 
-Phase 0 must expose one explicit engine runtime lifecycle, even if the final symbol names differ:
+Phase 0 must expose one explicit engine runtime lifecycle, even if the final symbol names differ. The canonical plan's preferred shape is `createEngine(options?) → Engine` plus `engine.close()`:
 
 ```text
-startEngine(options?)
-  → initializes/attaches the shared runtime
-  → starts the internal PendingAsk advancer
-  → starts or attaches to the existing soft-expiry/reaper machinery
+createEngine(options?)
+  → creates/attaches the shared runtime
+  → owns exactly one internal PendingAsk advancer
+  → initializes or attaches to the existing authoritative soft-expiry/reaper machinery
 
-stopEngine()
+engine.close()
   → stops new scheduling
-  → allows or cancels in-flight advancement according to policy
-  → releases leases/timers cleanly
+  → handles in-flight advancement according to the documented shutdown policy
+  → releases process-local ownership/timers cleanly
 ```
 
 Requirements:
 
-- MCP server startup calls the same runtime start path.
-- A library consumer calls the same runtime start path.
-- Repeated start is idempotent or returns a stable already-started result.
-- Stop is idempotent.
+- MCP server startup calls the same runtime creation/start path.
+- A library consumer calls the same runtime creation/start path.
+- Repeated runtime creation is idempotent or returns a stable already-started/already-owned result according to the implementation boundary.
+- Close is idempotent.
 - There is one owner for the advancer and one owner for reaper timers in the process.
 - Completion is durably written before an ask is removed from the pending registry.
+- The existing authoritative reaper remains the reaper; Phase 0 must not create a second reaper or duplicate soft-expiry state.
 - Exact module/file names (`src/engine.ts` vs `src/engine/index.ts`, etc.) are implementation choices; the lifecycle contract is not.
 
 ## 3. Single-process ownership rule
@@ -48,12 +49,12 @@ Requirements:
 Phase 0 assumes one Node process owns a browser profile/data directory and its engine runtime:
 
 ```text
-one process → CDP pool + tab registry + PendingAsk advancer + reaper + event store
+one process → CDP pool + tab registry + PendingAsk advancer + existing reaper + event store
 ```
 
 Do not design competing MCP and library processes for the same browser profile in Phase 0. If MCP and library calls coexist, they must share the same in-process runtime. Multi-process coordination, distributed leases, and horizontal scaling are out of scope.
 
-Document the failure mode for a second process explicitly (`ENGINE_ALREADY_OWNED`, or equivalent) rather than allowing two advancers to compete silently.
+If the implementation enforces same-profile process ownership, document the failure mode for a second process explicitly (`ENGINE_ALREADY_OWNED`, or equivalent) rather than allowing two advancers to compete silently. This is a single-process safety rule, not a requirement to introduce distributed coordination.
 
 ## 4. Definition-of-done tiers
 
@@ -62,7 +63,7 @@ Use two labels so environmental provider failures do not obscure engine completi
 ### Hard facade-unlock DoD
 
 - Importable non-MCP library entrypoint.
-- Runtime start/stop with one advancer/reaper owner.
+- Runtime creation/close with one advancer owner and the existing authoritative reaper.
 - Internal advancement with zero client polls.
 - Frozen status/snapshot contract and tests.
 - Idempotent retry with no second send.
@@ -85,7 +86,8 @@ The hard DoD unblocks comet-api development. The full badge remains the release-
 - Symbol maps may be a dedicated planning file or a PR description if the result is durable and reviewable.
 - New module names are suggestions, not requirements.
 - Do not add OpenAPI, HTTP routes, SSE, MCP-Bridge, broad tool calling, NotebookLM, or pi-livecraft implementation to Phase 0.
-- Do not rewrite completion detection, the event store, the reaper, or P4 relay safety while exporting the library boundary.
+- Do not rewrite completion detection, the event store, the existing authoritative reaper, or P4 relay safety while exporting the library boundary.
+- The Phase 0 extraction invariant is mandatory: new modules must wrap, delegate to, or clearly complement existing authoritative lifecycle components; they must not introduce a competing engine, PendingAsk registry, completion detector, durable store, or reaper.
 - Keep the existing unit/live test bar green after each PR slice.
 
 ## 6. Handoff to comet-api
@@ -102,7 +104,7 @@ When hard DoD passes:
 For a small code worker:
 
 - Read the existing `dispatchAsk`, `advanceAsk`, PendingAsk, reaper, and MCP startup paths before modifying anything.
-- Make PR-1 docs-only and PR-2 export-only where possible.
+- Make PR-1 docs-only and PR-2 export-focused where possible.
 - Make PR-3 the first place that can claim client-poll-free completion.
 - If live browser access is unavailable, complete hard DoD with fixtures and record the blocker; do not fake a provider pass.
-- Stop and ask for review if the change requires a second completion detector, second event store, HTTP route, P5b/P7 scheduler, or multi-process ownership scheme.
+- Stop and ask for review if the change requires a second completion detector, second event store, second reaper, HTTP route, P5b/P7 scheduler, or multi-process ownership scheme.
