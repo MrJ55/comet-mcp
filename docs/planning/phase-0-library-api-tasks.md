@@ -11,7 +11,9 @@ Phase 0 makes the existing comet-mcp engine consumable as a library. It does **n
 
 The engine runtime owns the background advancer. Consumers call the stable library facade; they do not manually drive `advanceAsk()` or implement polling. MCP handlers and comet-api must use the same engine functions.
 
-The runtime must have an explicit lifecycle boundary (for example `createEngine()` / `close()`, or an equivalent existing abstraction): importing the library must not start MCP stdio, and startup/shutdown must not accidentally create duplicate advancers.
+The runtime must have an explicit lifecycle boundary (preferred: `createEngine()` / `engine.close()`, or an equivalent existing abstraction): importing the library must not start MCP stdio, and startup/shutdown must not accidentally create duplicate advancers.
+
+**Preferred handle model:** facade operations take an explicit `engine` handle (or are methods on it). Avoid a process-global singleton for production paths so tests and multi-instance use stay safe. Document any temporary singleton only if required by existing MCP wiring.
 
 The advancer is a driver of the existing ask lifecycle, not a second lifecycle authority. Existing PendingAsk, event-store, response-store, completion detection, soft-expiry/reaper, tab registry, and relay safety semantics remain authoritative.
 
@@ -31,12 +33,12 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Documented library entrypoint importable without starting MCP stdio
 - [ ] Explicit engine runtime startup/shutdown owns exactly one internal advancer
 - [ ] Internal advancer completes asks with **zero** client polls/manual `advanceAsk()` calls
-- [ ] Status vocabulary frozen and unit-tested
+- [ ] Status vocabulary frozen: markdown table **and** a single exported TypeScript union/enum + pure `usable(status)` used by snapshots and tests
 - [ ] Only `completed` is a successful/usable completion; terminal failure states remain non-usable
 - [ ] Idempotent retry: same `idempotencyKey` + same request identity replays the original ask/outcome with no second send
 - [ ] Same `idempotencyKey` + different request identity returns `IDEMPOTENCY_CONFLICT`
 - [ ] Restart/reinitialization behavior for unfinished asks is documented and tested where practical
-- [ ] Live or scripted gate: five providers (or explicit waiver with issue link)
+- [ ] **Default CI gate is scripted/mock**; live five-provider gate is env-gated or manual (or explicit waiver with issue link)
 - [ ] `docs/build-plan.md` notes P5b/P7 deferred; facade Phase 0 unlocked
 - [ ] Unit tests still green; add tests for new modules
 - [ ] Short runbook: how comet-api (or a script) should call the library
@@ -55,6 +57,10 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 ### A2. Define engine runtime ownership
 - [ ] Identify the object/module that owns engine startup and shutdown
+- [ ] Prefer concrete API shape:
+  - `createEngine(opts?)` → `Engine` handle
+  - `engine.close()` graceful shutdown
+  - Facade ops take `engine` (or are methods on it); no implicit duplicate runtime on random API calls
 - [ ] Define one advancer instance per engine runtime; importing the library alone must not start MCP stdio or an advancer
 - [ ] Define graceful shutdown: finish in-flight work or release its lease cleanly; no orphaned timers/workers
 - [ ] Document whether unfinished asks are reconstructed from existing durable state after restart; do not invent a second durable queue
@@ -65,11 +71,12 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 ### A3. Freeze status vocabulary
 - [ ] Confirm engine statuses actually emitted today: at least `in_progress`, `confirming`, `completed`, `watching`, plus failure/tab-closed paths
 - [ ] Document final enum in `docs/planning/phase-0-lifecycle.md` (or ADR snippet)
-- [ ] Define `usable: boolean` rule: only `completed` is usable for OpenAI-shaped success
+- [ ] Export a single TypeScript union/enum (e.g. `AskStatus`) as the machine contract; keep the markdown table as the human contract
+- [ ] Define pure `usable(status): boolean` — only `completed` is usable for OpenAI-shaped success; unit-test it
 - [ ] Distinguish terminal from successful: e.g. `completed` = terminal+usable; `failed`/`tab_closed`/`cancelled` = terminal+not usable; `watching` = non-terminal+not usable
 - [ ] Document that HTTP wait cancel ≠ ask cancel (for facade later)
 
-**Acceptance:** One markdown table: status → terminal? → usable? → advancer action
+**Acceptance:** One markdown table: status → terminal? → usable? → advancer action; plus exported TS type + `usable()` tests.
 
 ---
 
@@ -79,7 +86,9 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Prefer new module e.g. `src/engine.ts` or `src/engine/index.ts` that re-exports a stable facade
 - [ ] Keep MCP `src/index.ts` as thin wrapper calling the same functions
 - [ ] Update `package.json` `exports` / `main` / `types` so Node can `import { … } from 'comet-mcp'` or `comet-mcp/engine` without running MCP server
+  - Example dual export intent: `"."` → MCP entry; `"./engine"` → library facade (no stdio side effects)
 - [ ] Keep engine lifecycle explicit; do not make individual API calls implicitly start duplicate runtimes
+- [ ] PR-2 may ship `createEngine`/`close` with a no-op or stub advancer so smoke tests can create/close without the full loop
 
 ### B2. Implement/export tab operations
 - [ ] `listTabs()` / existing registry list
@@ -100,11 +109,20 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] `resolveTab({ provider, tabId? })` — **no silent wrong-tab default**; if tabId omitted, document policy
 - [ ] For Phase 0/Phase 1 facade, prefer explicit `TAB_BUSY` / 409 semantics over introducing an admission queue; queueing is deferred
 - [ ] `assertTabIdle(tabId)` or occupied-tab detection for one-active-ask-per-tab
-- [ ] Return stable codes: `TAB_BUSY`, `TAB_NOT_FOUND`, `TAB_CAP_EXCEEDED`, `PROVIDER_UNAVAILABLE`
+- [ ] Return stable codes: `TAB_BUSY`, `TAB_NOT_FOUND`, `TAB_CAP_EXCEEDED`, `PROVIDER_UNAVAILABLE`, `IDEMPOTENCY_CONFLICT`
+- [ ] Prefer one minimal error shape for library consumers: `{ code: string, message: string, details?: unknown }` — no large hierarchy in Phase 0
 
 ### B5. Package + docs for consumers
 - [ ] README or `docs/runbooks/engine-library.md`: install/link, minimal script example
 - [ ] Example script `scripts/engine-ask-smoke.mjs` (or `.ts`) used in DoD
+- [ ] Runbook sequence should mirror comet-api needs:
+  1. `createEngine(...)`
+  2. `openTab` / `resolveTab` (documented policy; no silent wrong tab)
+  3. `dispatchAsk` with `idempotencyKey`
+  4. Rely on advancer; optionally poll `getAsk` until terminal
+  5. `getResponse`
+  6. `engine.close()` on process exit
+- [ ] Multi-turn Phase 0 model: same tab + new prompt + distinct `idempotencyKey` (state this in the runbook)
 
 **Acceptance:** From repo root, a script imports library, opens/lists, dispatches, and (with advancer) completes without MCP.
 
@@ -118,10 +136,10 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] The advancer must use the **existing ask lifecycle state** as its source of truth; do not create a second durable queue/state machine
 - [ ] One owner per ask (lease/mutex); no double advance
 - [ ] Global + per-provider concurrency limits (respect pool cap ~5)
-- [ ] Use existing per-tab backoff/circuit breaker; do not bypass
+- [ ] Use existing per-tab backoff/circuit breaker; do not bypass; no busy-loop spin on `next due`
 - [ ] On soft-expiry/`watching`, hand off to existing reaper — do not invent second reaper
 - [ ] Stop advancing on terminal states
-- [ ] Document the source of `next due` timing, wake-up mechanism, lease ownership, and restart behavior
+- [ ] Document the source of `next due` timing, wake-up mechanism, lease ownership/TTL, and restart behavior
 
 ### C2. Lifecycle integration
 - [ ] Start/stop advancer from the explicit engine runtime lifecycle
@@ -148,9 +166,13 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] `AskSnapshot` fields: ids, provider, tabId, status, usable, error?, responseId?, confidence?, timestamps
 - [ ] Map confirming vs completed correctly (no false success while stability window holds)
 - [ ] Preserve distinction between terminal and successful/usable
+- [ ] Snapshot status values come from the shared `AskStatus` enum / `usable()` helper
 
 ### D2. Idempotency
 - [ ] Define request identity/fingerprint bound to `idempotencyKey`
+  - Minimal deterministic fields from the dispatch payload (e.g. `provider`, `tabId?`, normalized `prompt` or content hash, plus any model/mode fields that affect the send)
+  - Exclude timestamps, `correlationId`, and other non-identity metadata
+  - Exact field list: derive from existing dispatch payload; document in lifecycle note or runbook
 - [ ] Replay same idempotencyKey + same request identity returns prior ask/outcome before send
 - [ ] Same idempotencyKey + different request identity returns `IDEMPOTENCY_CONFLICT`
 - [ ] Test: two dispatchAsk same key → one send.queued/accepted in event log and same correlation identity
@@ -171,6 +193,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 ### E1. Script
 - [ ] `scripts/phase0-live-gate.mjs` (or test/integration) configurable via env
+- [ ] Prefer a **scripted/mock driver path as the default CI gate**; live browser run is opt-in via env
 - [ ] For each provider in: perplexity, grok, gemini, chatgpt, claude:
   - health/open as needed
   - dispatchAsk unique idempotencyKey
@@ -181,12 +204,13 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Exit non-zero on failure
 
 ### E2. Minimum extra cases
-- [ ] At least one multi-turn follow-up (Perplexity + one other)
+- [ ] At least one multi-turn follow-up (Perplexity + one other): same tab, new prompt, distinct idempotencyKey
 - [ ] At least one failure path test (invalid tabId or closed tab) does not hang advancer
 
 ### E3. Record results
 - [ ] Paste summary into PR or `docs/planning/phase-0-live-gate-results.md`
 - [ ] Known environmental blockers (rate limit, login) documented — not silent skip
+- [ ] If live gate cannot run: ship library+advancer+unit/scripted tests and link a waiver issue
 
 ---
 
@@ -198,6 +222,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 ### F2. Consumer contract snippet
 - [ ] Add `docs/runbooks/engine-library.md` with copy-paste example matching what comet-api `src/clients/comet-engine.ts` will call
+- [ ] Include explicit engine handle lifecycle and multi-turn (same-tab) note
 
 ### F3. Notify facade repo (human or follow-up commit in comet-api)
 - [ ] comet-api `planning/progress.md`: Phase 0 unlocked + commit SHA of engine
@@ -210,10 +235,10 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 | PR | Scope |
 |---|---|
 | PR-1 | A1–A3 docs only: symbol map + runtime-boundary note + lifecycle table |
-| PR-2 | B1–B3 library exports + explicit engine lifecycle (no advancer yet) |
+| PR-2 | B1–B3 library exports + explicit engine lifecycle (`createEngine`/`close`; stub advancer OK) |
 | PR-3 | C1–C3 internal advancer + tests + recovery behavior |
 | PR-4 | B4–B5 + D1–D4 snapshot/idempotency polish |
-| PR-5 | E1–E3 live gate script + results |
+| PR-5 | E1–E3 scripted default gate + optional live results |
 | PR-6 | F1–F2 build-plan + runbook |
 
 Do not combine PR-3 and PR-5 in one change if unstable.
@@ -228,9 +253,10 @@ Do not combine PR-3 and PR-5 in one change if unstable.
 4. **No HTTP server** in this phase.
 5. Prefer **minimal diffs**; match existing TypeScript style.
 6. After each PR: run unit tests; fix breakages before next slice.
-7. If live gate cannot run (no browser), still ship library+advancer+unit tests and document blocker.
+7. If live gate cannot run (no browser), still ship library+advancer+unit/scripted tests and document blocker.
 8. When unsure, extend existing modules rather than new frameworks.
 9. Do not silently introduce busy-tab admission queues, alternate completion semantics, or new lifecycle authorities.
+10. Status strings and `usable()` must come from the shared enum/helper — do not hard-code ad-hoc status literals in new modules.
 
 ---
 
@@ -246,3 +272,4 @@ Do not combine PR-3 and PR-5 in one change if unstable.
 | Idempotency-Key | D2 |
 | Sync wait / async pull | C + D (engine completes; HTTP later) |
 | 5 models in /v1/models | Workstream E |
+| Error / 409 mapping | B4, D2 |
