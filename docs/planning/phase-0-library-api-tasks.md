@@ -9,6 +9,8 @@
 
 Phase 0 makes the existing comet-mcp engine consumable as a library. It does **not** create a second engine, scheduler, completion detector, event store, reaper, or relay implementation.
 
+**Extraction invariant:** Phase 0 must expose/extract a library facade **around the existing engine**, not build a second engine alongside it. `dispatchAsk`, `advanceAsk`, completion detection, PendingAsk lifecycle, event/response persistence, tab ownership, soft-expiry/reaper, and relay semantics remain implemented by their existing authoritative components. New Phase-0 modules may coordinate or expose those components, but must not duplicate their state machines, registries, completion logic, or durable stores.
+
 The engine runtime owns the background advancer. Consumers call the stable library facade; they do not manually drive `advanceAsk()` or implement polling. MCP handlers and comet-api must use the same engine functions.
 
 The runtime must have an explicit lifecycle boundary (preferred: `createEngine()` / `engine.close()`, or an equivalent existing abstraction): importing the library must not start MCP stdio, and startup/shutdown must not accidentally create duplicate advancers.
@@ -33,6 +35,7 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 - [ ] Documented library entrypoint importable without starting MCP stdio
 - [ ] Explicit engine runtime startup/shutdown owns exactly one internal advancer
+- [ ] **Facade/extraction invariant verified:** the library path and MCP path invoke the same underlying ask lifecycle, completion/persistence components, and authoritative state; no duplicate engine, PendingAsk registry, completion detector, event store, response store, or reaper is introduced
 - [ ] Internal advancer completes asks with **zero** client polls/manual `advanceAsk()` calls
 - [ ] Status vocabulary frozen: markdown table **and** a single exported TypeScript union/enum + pure `usable(status)` used by snapshots and tests
 - [ ] Only `completed` is a successful/usable completion; terminal failure states remain non-usable
@@ -54,6 +57,8 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 - [ ] Locate event-store append + idempotency (`src/core/event-store.ts`)
 - [ ] Locate tab registry + pool (`src/tab-registry.ts`, `src/cdp-pool.ts`)
 - [ ] Locate stop/cancel if any (`provider_stop`)
+- [ ] **For each lifecycle responsibility, identify the existing authoritative component and record it in the symbol map.** At minimum: dispatch, PendingAsk state, completion detection, event persistence, response persistence, tab ownership, soft-expiry/reaper, and relay safety.
+- [ ] **For every new Phase-0 module, record whether it wraps/delegates to an existing component or introduces genuinely new runtime behavior. No new module may become a second authoritative implementation of an existing lifecycle responsibility.**
 - [ ] Write a short symbol map table at the top of a new `docs/planning/phase-0-symbol-map.md` OR in the PR description
 
 ### A2. Define engine runtime ownership
@@ -254,8 +259,6 @@ The advancer is a driver of the existing ask lifecycle, not a second lifecycle a
 
 Do not combine PR-3 and PR-5 in one change if unstable.
 
----
-
 ## Worker guardrails (DeepSeek / small agents)
 
 1. **Read before write:** open existing `dispatchAsk`/`advanceAsk` paths; wrap, do not rewrite completion detection.
@@ -270,6 +273,7 @@ Do not combine PR-3 and PR-5 in one change if unstable.
 10. Status strings and `usable()` must come from the shared enum/helper — do not hard-code ad-hoc status literals in new modules.
 11. **Ownership is process-local:** do not build distributed leases (Redis/etcd/fencing). Required invariant is only “one ask → at most one active advancement.” A local mutex/claim is enough.
 12. Prefer **`getResponse(askId)`** for consumers; internal ask→response resolution is fine. Do not over-engineer identity unification in Phase 0.
+13. **Extraction invariant:** Phase 0 is an extraction/facade effort, not a second-engine implementation. Every new runtime component must delegate to, wrap, or clearly complement an existing authoritative component; if a proposed change creates a competing lifecycle state machine, registry, completion detector, durable store, or reaper, stop and resolve the boundary before coding further.
 
 ---
 
