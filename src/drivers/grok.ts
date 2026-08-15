@@ -137,6 +137,13 @@ export class GrokDriver implements ChatDriver {
       editable.focus();
       document.execCommand('selectAll', false, null);
       document.execCommand('insertText', false, ${JSON.stringify(prompt)});
+      // 2026-08-15 (live bug, verified on the grok tab): execCommand('insertText')
+      // sets the DOM but does NOT fire React's onChange — the send button never
+      // renders, Enter no-ops, and the composer-emptied check fails (send.unknown,
+      // prompt never submitted). Same bug class perplexity had (0cc93db). Dispatch
+      // a DATA-LESS InputEvent so React registers the value and enables submit —
+      // with data, the editor ALSO inserts the text itself, doubling the prompt.
+      editable.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
       return { success: true };
     })()`);
     if (typed?.success !== true) {
