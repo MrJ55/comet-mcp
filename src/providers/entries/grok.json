@@ -15,11 +15,11 @@
         "min-h-[60px]"
       ],
       "snippet": "\n",
-      "confidence": 0.8,
-      "success_count": 1,
-      "fail_count": 1,
+      "confidence": 0.7000000000000001,
+      "success_count": 2,
+      "fail_count": 2,
       "fingerprint": 3028313357,
-      "last_validated": 1786362784
+      "last_validated": 1786804776
     },
     "sendButton": {
       "selector": "[data-testid=\"chat-submit\"][aria-label=\"Submit\"]",
@@ -51,11 +51,11 @@
       "text": "Fast",
       "hasIcon": true,
       "disabled": false,
-      "confidence": 0.9500000000000001,
-      "success_count": 1,
+      "confidence": 1,
+      "success_count": 2,
       "fail_count": 0,
       "fingerprint": 3501286431,
-      "last_validated": 1786108682
+      "last_validated": 1786804776
     },
     "newChat": {
       "selector": "[aria-label=\"New chat\"]",
@@ -70,11 +70,11 @@
       "text": "",
       "hasIcon": true,
       "disabled": false,
-      "confidence": 0.9500000000000001,
-      "success_count": 1,
+      "confidence": 1,
+      "success_count": 2,
       "fail_count": 0,
       "fingerprint": 2764096832,
-      "last_validated": 1786108682
+      "last_validated": 1786804776
     },
     "responseContainer": {
       "selector": "[data-testid=\"assistant-message\"]",
